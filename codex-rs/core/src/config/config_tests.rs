@@ -41,6 +41,8 @@ use codex_config::permissions_toml::NetworkToml;
 use codex_config::permissions_toml::PermissionProfileToml;
 use codex_config::permissions_toml::PermissionsToml;
 use codex_config::permissions_toml::WorkspaceRootsToml;
+use codex_config::types::AgentImprovementConfig;
+use codex_config::types::AgentImprovementToml;
 use codex_config::types::AppToolApproval;
 use codex_config::types::ApprovalsReviewer;
 use codex_config::types::BundledSkillsConfig;
@@ -249,6 +251,44 @@ async fn load_config_applies_optional_mcp_startup_grace() -> std::io::Result<()>
     assert_eq!(
         config.mcp_optional_startup_grace,
         Duration::from_millis(2500)
+    );
+    Ok(())
+}
+
+#[tokio::test]
+async fn load_config_resolves_agent_improvement_settings() -> std::io::Result<()> {
+    let config_toml: ConfigToml = toml::from_str(
+        r#"
+[agent_improvement]
+enabled = true
+max_cards = 64
+max_context_tokens = 9000
+"#,
+    )
+    .expect("agent improvement TOML should deserialize");
+    assert_eq!(
+        config_toml.agent_improvement,
+        Some(AgentImprovementToml {
+            enabled: Some(true),
+            max_cards: Some(64),
+            max_context_tokens: Some(9000),
+        })
+    );
+
+    let config = Config::load_from_base_config_with_overrides(
+        config_toml,
+        ConfigOverrides::default(),
+        tempdir()?.abs(),
+    )
+    .await?;
+
+    assert_eq!(
+        config.agent_improvement,
+        AgentImprovementConfig {
+            enabled: true,
+            max_cards: 64,
+            max_context_tokens: 8_000,
+        }
     );
     Ok(())
 }

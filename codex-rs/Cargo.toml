@@ -61,6 +61,7 @@ members = [
     "exec-server/tests/support",
     "execpolicy",
     "ext/agent",
+    "ext/agent-improvement",
     "ext/agent-message-board",
     "ext/connectors",
     "ext/extension-api",
@@ -258,6 +259,7 @@ codex-login = { path = "login" }
 codex-mermaid = { path = "mermaid" }
 codex-message-history = { path = "message-history" }
 codex-memories-extension = { path = "ext/memories" }
+codex-agent-improvement-extension = { path = "ext/agent-improvement" }
 codex-web-search-extension = { path = "ext/web-search" }
 codex-memories-read = { path = "memories/read" }
 codex-memories-write = { path = "memories/write" }

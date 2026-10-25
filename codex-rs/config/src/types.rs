@@ -58,10 +58,16 @@ pub const DEFAULT_MEMORIES_MIN_ROLLOUT_IDLE_HOURS: i64 = 6;
 pub const DEFAULT_MEMORIES_MIN_RATE_LIMIT_REMAINING_PERCENT: i64 = 25;
 pub const DEFAULT_MEMORIES_MAX_RAW_MEMORIES_FOR_CONSOLIDATION: usize = 256;
 pub const DEFAULT_MEMORIES_MAX_UNUSED_DAYS: i64 = 30;
+pub const DEFAULT_AGENT_IMPROVEMENT_MAX_CARDS: usize = 8;
+pub const DEFAULT_AGENT_IMPROVEMENT_MAX_CONTEXT_TOKENS: usize = 1_200;
 const MIN_MEMORIES_MAX_RAW_MEMORIES_FOR_CONSOLIDATION: usize = 1;
 const MAX_MEMORIES_MAX_RAW_MEMORIES_FOR_CONSOLIDATION: usize = 4096;
 const MIN_MEMORIES_MAX_ROLLOUTS_PER_STARTUP: usize = 1;
 const MAX_MEMORIES_MAX_ROLLOUTS_PER_STARTUP: usize = 128;
+const MIN_AGENT_IMPROVEMENT_MAX_CARDS: usize = 1;
+const MAX_AGENT_IMPROVEMENT_MAX_CARDS: usize = 64;
+const MIN_AGENT_IMPROVEMENT_MAX_CONTEXT_TOKENS: usize = 256;
+const MAX_AGENT_IMPROVEMENT_MAX_CONTEXT_TOKENS: usize = 8_000;
 
 const fn default_enabled() -> bool {
     true
@@ -315,6 +321,59 @@ pub struct ToolSuggestConfig {
 }
 
 pub use codex_protocol::MemoryVersion;
+
+/// Opt-in local experience retrieval settings for agent improvement.
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq, Default, JsonSchema)]
+#[serde(deny_unknown_fields)]
+#[schemars(deny_unknown_fields)]
+pub struct AgentImprovementToml {
+    /// When true, bounded local experience cards may be retrieved as advisory context.
+    pub enabled: Option<bool>,
+    /// Maximum number of experience cards that may be rendered for one turn.
+    #[schemars(range(min = 1, max = 64))]
+    pub max_cards: Option<usize>,
+    /// Maximum context budget reserved for rendered experience cards.
+    #[schemars(range(min = 256, max = 8000))]
+    pub max_context_tokens: Option<usize>,
+}
+
+/// Effective agent improvement settings after defaults are applied.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct AgentImprovementConfig {
+    pub enabled: bool,
+    pub max_cards: usize,
+    pub max_context_tokens: usize,
+}
+
+impl Default for AgentImprovementConfig {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            max_cards: DEFAULT_AGENT_IMPROVEMENT_MAX_CARDS,
+            max_context_tokens: DEFAULT_AGENT_IMPROVEMENT_MAX_CONTEXT_TOKENS,
+        }
+    }
+}
+
+impl From<AgentImprovementToml> for AgentImprovementConfig {
+    fn from(toml: AgentImprovementToml) -> Self {
+        let defaults = Self::default();
+        Self {
+            enabled: toml.enabled.unwrap_or(defaults.enabled),
+            max_cards: toml.max_cards.unwrap_or(defaults.max_cards).clamp(
+                MIN_AGENT_IMPROVEMENT_MAX_CARDS,
+                MAX_AGENT_IMPROVEMENT_MAX_CARDS,
+            ),
+            max_context_tokens: toml
+                .max_context_tokens
+                .unwrap_or(defaults.max_context_tokens)
+                .clamp(
+                    MIN_AGENT_IMPROVEMENT_MAX_CONTEXT_TOKENS,
+                    MAX_AGENT_IMPROVEMENT_MAX_CONTEXT_TOKENS,
+                ),
+        }
+    }
+}
 
 /// Memories settings loaded from config.toml.
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Default, JsonSchema)]

@@ -87,13 +87,21 @@ pub(crate) async fn build_prompt_input_from_session(
 ) -> CodexResult<Vec<ResponseItem>> {
     let turn_context = sess.new_default_turn().await;
     // Prompt debugging builds a standalone request without entering run_turn.
+    let cancellation_token = CancellationToken::new();
     let step_context = sess
-        .capture_step_context(Arc::clone(&turn_context), &CancellationToken::new())
+        .capture_step_context(Arc::clone(&turn_context), &cancellation_token)
         .await?;
     sess.record_context_updates_and_set_reference_context_item(step_context.as_ref())
         .await?;
 
     if !input.is_empty() {
+        let extension_items = crate::session::turn::build_extension_turn_input_items(
+            sess,
+            step_context.as_ref(),
+            &input,
+            &cancellation_token,
+        )
+        .await;
         let response_item = sess.response_item_from_user_input(input);
         sess.record_conversation_items(
             turn_context.as_ref(),
@@ -101,6 +109,17 @@ pub(crate) async fn build_prompt_input_from_session(
             std::slice::from_ref(&response_item),
         )
         .await;
+
+        if let Some(extension_items) = extension_items {
+            for response_item in extension_items {
+                sess.record_conversation_items(
+                    &turn_context,
+                    &step_context.settings.model_info,
+                    std::slice::from_ref(&response_item),
+                )
+                .await;
+            }
+        }
     }
 
     let prompt_input = sess

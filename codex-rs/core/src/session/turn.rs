@@ -1263,7 +1263,7 @@ async fn build_skills_and_plugins(
     skip_all,
     fields(user_input_count = user_input.len())
 )]
-async fn build_extension_turn_input_items(
+pub(crate) async fn build_extension_turn_input_items(
     sess: &Arc<Session>,
     step_context: &StepContext,
     user_input: &[UserInput],

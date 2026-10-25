@@ -1,0 +1,30 @@
+[package]
+edition.workspace = true
+license.workspace = true
+name = "codex-agent-improvement-extension"
+version.workspace = true
+
+[lib]
+name = "codex_agent_improvement_extension"
+path = "src/lib.rs"
+doctest = false
+
+[lints]
+workspace = true
+
+[dependencies]
+codex-context-fragments = { workspace = true }
+codex-core = { workspace = true }
+codex-extension-api = { workspace = true }
+codex-protocol = { workspace = true }
+codex-rollout-trace = { workspace = true }
+codex-utils-string = { workspace = true }
+serde = { workspace = true, features = ["derive"] }
+serde_json = { workspace = true }
+sha2 = { workspace = true }
+tracing = { workspace = true }
+
+[dev-dependencies]
+pretty_assertions = { workspace = true }
+tempfile = { workspace = true }
+tokio = { workspace = true, features = ["macros", "rt-multi-thread"] }

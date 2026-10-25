@@ -142,6 +142,32 @@ fn memories_config_clamps_count_limits_to_nonzero_values() {
 }
 
 #[test]
+fn agent_improvement_is_opt_in_and_clamps_context_limits() {
+    assert_eq!(
+        AgentImprovementConfig::default(),
+        AgentImprovementConfig {
+            enabled: false,
+            max_cards: 8,
+            max_context_tokens: 1_200,
+        }
+    );
+
+    let config = AgentImprovementConfig::from(AgentImprovementToml {
+        enabled: Some(true),
+        max_cards: Some(0),
+        max_context_tokens: Some(99_999),
+    });
+    assert_eq!(config.enabled, true);
+    assert_eq!(config.max_cards, 1);
+    assert_eq!(config.max_context_tokens, 8_000);
+}
+
+#[test]
+fn agent_improvement_toml_rejects_unknown_fields() {
+    assert!(toml::from_str::<AgentImprovementToml>("enabled = true\nunexpected = true").is_err());
+}
+
+#[test]
 fn memories_config_clamps_rate_limit_remaining_threshold() {
     let config = MemoriesConfig::from(MemoriesToml {
         min_rate_limit_remaining_percent: Some(101),

@@ -9,6 +9,7 @@ use anyhow::Context;
 use anyhow::bail;
 use clap::Parser;
 use codex_core_api::AbsolutePathBuf;
+use codex_core_api::AgentImprovementConfig;
 use codex_core_api::AltScreenMode;
 use codex_core_api::ApprovalsReviewer;
 use codex_core_api::Arg0DispatchPaths;
@@ -338,6 +339,7 @@ async fn new_config(
         agent_max_depth: 1,
         agent_roles: BTreeMap::new(),
         memories: MemoriesConfig::default(),
+        agent_improvement: AgentImprovementConfig::default(),
         sqlite: SqliteConfig::from_sqlite_home(codex_home.clone()),
         log_dir: codex_home.join("log").to_path_buf(),
         codex_home,

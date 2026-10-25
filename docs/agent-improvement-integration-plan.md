@@ -1,0 +1,885 @@
+# Agent Improvement Integration Plan
+
+Status: Milestone 1 complete; Milestones 2–8 planned
+
+## Objective
+
+Integrate the immediately adoptable, essential, and high-value ideas from the
+Meta^n repository into this Codex fork without creating a second agent runtime.
+The implementation should make Codex better at learning from observed work while
+preserving existing instruction, permission, sandbox, privacy, and extension
+boundaries.
+
+The target is a reviewed, measurable improvement flywheel:
+
+```text
+Codex rollout trace
+        |
+        v
+Reduced evidence and failure classification
+        |
+        v
+Candidate lesson in a local review queue
+        |
+        v
+Diagnosis, candidate strategy, or bounded experience card
+        |
+        v
+Sandboxed baseline/holdout evaluation
+        |
+        v
+Explicit review, promotion, rollback, and scoped retrieval
+        |
+        v
+Better execution and verification, producing new evidence
+```
+
+This deliberately uses the existing Codex rollout-trace and extension systems.
+It does not execute Meta^n-generated code, mutate `AGENTS.md` automatically, or
+send local traces anywhere. The endpoint is controlled continual improvement of
+the agent's local operating guidance, not model-weight training and not an
+unreviewed self-modifying runtime.
+
+## Evidence and design constraints
+
+The Meta^n repository contributes the following reusable concepts:
+
+- structured execution traces instead of transcript-only memory;
+- explicit failure classes and next-step guidance;
+- an archive of reusable experience with bounded retrieval;
+- adoption and provenance signals;
+- regression-aware promotion rather than unconditional prompt mutation.
+
+The Codex fork already provides the required foundations:
+
+- opt-in local rollout bundles and deterministic replay in
+  `codex-rs/rollout-trace`;
+- extension prompt and turn-input contributors in
+  `codex-rs/ext/extension-api`;
+- persistent Goals and existing Skills/AGENTS.md support;
+- a `codex debug` CLI surface;
+- local-only state and sandboxing primitives.
+
+OpenAI's current Codex workflow guidance also recognizes `AGENTS.md` as durable
+repository guidance and recommends separating goals, plans, prompts, phase
+context, and observed evidence. See:
+
+- <https://developers.openai.com/cookbook/examples/codex/iterating-development-workflows-with-codex>
+- <https://developers.openai.com/cookbook/examples/codex/using_goals_in_codex>
+- <https://developers.openai.com/cookbook/examples/agents_sdk/agent_improvement_loop>
+
+## Non-goals
+
+- No automatic model-generated code execution from Meta^n.
+- No automatic edits to `AGENTS.md`, Skills, prompts, or repository code.
+- No upload or remote analytics path for raw rollout traces.
+- No claim that a per-task best card is a generally superior policy.
+- No replacement of the existing memories subsystem.
+- No new model calls in the hot path for classification or card selection.
+- No change to default Codex behavior until the feature is explicitly enabled.
+
+These are release-one constraints. Later milestones may use a model in an
+offline proposer/evaluation path, but they must retain the same permission,
+privacy, provenance, rollback, and human-review boundaries.
+
+## Roadmap and milestones
+
+Milestone 1 is complete in this working tree. The remaining milestones are
+ordered by the dependency that makes each new form of autonomy safe and
+measurable. A milestone is not considered complete merely because its code
+exists; its exit gate and regression evidence must also be satisfied.
+
+| Milestone | Outcome | Priority | Depends on | Status |
+| --- | --- | --- | --- | --- |
+| 1. Safe local experience foundation | Deterministic, privacy-bounded cards can be created explicitly and retrieved as advisory context | Essential | Existing trace and extension systems | Complete |
+| 2. Automatic candidate capture and review | Long sessions produce reviewable candidates without requiring a manual CLI step; nothing is promoted automatically | Immediately next | 1 | Planned |
+| 3. Evidence-rich lessons and retrieval | Cards describe recurring failure signatures, interventions, outcomes, scope, and confidence rather than only coarse summaries | High value | 2 | Planned |
+| 4. Replay and evaluation harness | Baseline versus memory-assisted work can be measured on paired and held-out tasks | Essential before autonomy | 2–3 | Planned |
+| 5. Offline proposer and candidate artifacts | A focused skill or offline model call can propose cards, skills, or guidance diffs for review | High value | 3–4 | Planned |
+| 6. Promotion, rollback, and policy control plane | Candidate changes become versioned, scoped, reversible active knowledge only after evidence and review | Essential | 4–5 | Planned |
+| 7. Slow loop for long-horizon improvement | Periodic analysis finds recurring patterns, stale knowledge, and missed evidence, then proposes the next experiments | High value / research | 4–6 | Planned |
+| 8. Optional program-level evolution and transfer | Isolated evolution of skills, prompts, or extension policy can be explored across task families without mutating the live agent | Research only | 6–7 | Planned |
+
+### Milestone 1 — Safe local experience foundation (complete)
+
+The implemented first increment is intentionally narrow. It provides the safe
+memory substrate on which the rest of the roadmap depends:
+
+- a deterministic reduced-trace summarizer and bounded `ExperienceCard` schema;
+- an append-only, local JSONL store with malformed-data and resource limits;
+- explicit CLI capture and inspection commands;
+- opt-in advisory retrieval through the extension system;
+- no automatic capture, no generated policy changes, and no model call in the
+  hot path.
+
+The detailed implementation tasks and validation record for this milestone are
+below. Its known limitation is important: one aggregate card per manually
+selected rollout is useful for repeated local failure patterns, but it is not
+yet an automatic learning loop or a causal record that a recommendation helped.
+
+### Milestone 2 — Automatic candidate capture and human review
+
+**Intent:** remove the operational burden of remembering to run the summarizer
+after a long session while keeping the candidate-to-active boundary explicit.
+
+**Deliverables:**
+
+- Add a separate candidate store, for example:
+
+  ```text
+  $CODEX_HOME/agent-improvement/
+    cards.jsonl          # reviewed/promoted cards consumed by retrieval
+    candidates.jsonl     # pending or rejected proposals, never injected
+  ```
+
+- Add an opt-in capture mode alongside the existing retrieval setting. The
+  default remains off. The first enabled mode is `candidate`, not
+  `auto_promote`.
+- Use the existing extension lifecycle boundaries (`on_turn_stop`,
+  `on_turn_error`, `on_turn_abort`, and `on_thread_stop`) plus the existing
+  rollout-trace finalization path to enqueue bounded post-turn or post-thread
+  summarization work. Summarization must not block model/tool execution or
+  make a failed turn fail harder.
+- Produce at most one deduplicated candidate per meaningful failure episode or
+  completed milestone, rather than one candidate for every event. A long
+  session should be segmented at turn failures, verification checkpoints, and
+  configured turn-count boundaries.
+- Add candidate lifecycle metadata: candidate ID, source trace ID, source turn
+  or episode ID, creation time, status (`pending`, `accepted`, `rejected`, or
+  `expired`), and a deterministic content fingerprint. Keep raw trace data in
+  the trace bundle; do not copy it into the candidate store.
+- Add explicit inspection and review commands, such as:
+
+  ```text
+  codex debug agent-improvement candidates list --store <DIR>
+  codex debug agent-improvement candidates show <ID> --store <DIR>
+  codex debug agent-improvement candidates accept <ID> --store <DIR>
+  codex debug agent-improvement candidates reject <ID> --store <DIR>
+  ```
+
+  `accept` must create or update a reviewed card through the same schema and
+  validation path as the manual flow. A pending candidate must never enter
+  prompt context.
+- Ship a focused `agent-card-curator` Skill as a user-invoked review workflow.
+  It may list candidates, explain bounded evidence, request an explicit
+  accept/reject decision, and call the CLI. The Skill is an interface to the
+  review queue, not permission to promote silently. It cannot recover a trace
+  that was not captured before the session started; automatic capture solves
+  that lifecycle limitation.
+
+**Configuration shape:** extend `[agent_improvement]` with an explicitly
+documented capture mode and independent queue limits. Keep retrieval and
+capture independently switchable. For example, `capture = "off"` or
+`capture = "candidate"`, `max_candidates`, `candidate_max_bytes`, and a
+bounded retention period. Do not expose automatic promotion yet.
+
+**Tests and verification:**
+
+- fake lifecycle sequences for normal completion, failed command, tool error,
+  cancellation, and thread shutdown;
+- prove capture is asynchronous/bounded and that store or replay errors do not
+  affect the turn result;
+- prove restart/replay idempotence and concurrent-writer safety;
+- prove candidate deduplication, queue limits, expiry, malformed-line
+  tolerance, and no candidate-to-prompt leakage;
+- integration-test the curator Skill against a temporary store with explicit
+  accept/reject decisions;
+- measure capture overhead and set a regression budget before enabling it by
+  default for development users.
+
+**Exit gate:** a user can finish a long session, find a bounded candidate
+without remembering a follow-up command, and review it later. The live agent's
+behavior is unchanged until the user explicitly accepts the candidate.
+
+### Milestone 3 — Evidence-rich lessons and retrieval
+
+**Intent:** make retrieved experience more actionable than a coarse failure
+label while retaining the privacy and prompt-budget properties of Milestone 1.
+
+**Deliverables:**
+
+- Version the card schema to represent a bounded failure signature and an
+  observed sequence, using controlled vocabularies rather than unrestricted
+  transcript text. Useful fields include operation class, tool family, exit
+  bucket, policy/sandbox reason, verification state, intervention labels,
+  recovery outcome, recurrence count, and last-seen time.
+- Represent the distinction between:
+  - an observed fact (`command_failed`, `verification_missing`);
+  - a hypothesis (`likely_missing_dependency`); and
+  - a recommendation (`rerun the narrow verification command`).
+  Hypotheses must carry lower confidence than observations and must not be
+  presented as policy.
+- Add scope to every card: repository/workspace identity, task family, and
+  optionally toolchain/model family. Scope must prevent a lesson learned in
+  one repository from silently becoming guidance in an unrelated one.
+- Add evidence of adoption without claiming causality: retrieval exposure,
+  explicit user feedback, subsequent verification result, and whether the
+  recommendation was followed when that can be observed. If the linkage is
+  unknown, record `unknown`, not success.
+- Improve ranking from token overlap alone with deterministic structured
+  filters and recency/confidence/recurrence signals. Keep selection stable,
+  bounded, and explainable; retain a lexical fallback for unknown task types.
+- Add stale-card decay, contradiction handling, duplicate merging, and an
+  explicit `retire` state. Never delete the only provenance for an active
+  card without preserving its audit record.
+
+**Tests and verification:**
+
+- schema migration and downgrade/unknown-field tests;
+- fixture-based ranking tests for task family, failure class, tool class,
+  scope, recency, confidence, recurrence, and ties;
+- tests proving a low-confidence hypothesis cannot outrank a directly observed
+  matching failure without evidence;
+- privacy tests for secrets, paths, prompts, outputs, identifiers, and control
+  characters across all new fields;
+- an offline retrieval benchmark with a fixed query/card fixture set, tracking
+  relevant-card precision, irrelevant-card rate, context size, and stable
+  ordering;
+- tests for exposure/outcome attribution that distinguish `seen`, `accepted`,
+  `followed`, `verified`, and `unknown`.
+
+**Exit gate:** on a held-out retrieval fixture, the richer representation is
+more relevant or equally relevant at lower context cost than Milestone 1, with
+no increase in unsafe or instruction-conflicting context. No claim about task
+success is made until Milestone 4 evaluates it.
+
+### Milestone 4 — Replay and evaluation harness
+
+**Intent:** turn “this card seems helpful” into a repeatable baseline-versus-
+assisted experiment before introducing model-generated changes or automatic
+promotion.
+
+**Deliverables:**
+
+- Define a local scenario manifest containing a task prompt or task reference,
+  repository snapshot/worktree, expected verification command(s), allowed
+  configuration, time/token budget, and an evaluator type. Keep scenario
+  inputs and private traces separate from published aggregate results.
+- Add an evaluation command or library, for example:
+
+  ```text
+  codex debug agent-improvement eval <SCENARIO_SET> \
+    --baseline <CONFIG> --treatment <CONFIG> --output <RESULTS>
+  ```
+
+  It must run matched baseline and memory-assisted conditions in isolated
+  worktrees or sandboxes and preserve the exact card/policy versions used.
+- Reuse rollout traces to calculate outcome metrics: task verification
+  success, incomplete verification, repeated failure, retry count, tool and
+  terminal operations, tokens, wall time, cancellation, policy/permission
+  events, and user correction/override when available.
+- Support both deterministic evaluators (tests, linters, type checks, expected
+  repository state) and explicitly labeled human/model-judge evaluators. A
+  judge score is evidence, not a substitute for an executable verification
+  signal when one exists.
+- Require a held-out split by task instance and report results per task family,
+  not only a pooled mean. Keep routed/per-task-best results separate from a
+  single policy result.
+
+**Tests and verification:**
+
+- deterministic fixture scenarios with known baseline and treatment outcomes;
+- isolation tests proving an evaluation cannot modify the primary checkout or
+  active card store;
+- result-schema tests for missing metrics, interrupted runs, partial traces,
+  evaluator failure, and cost limits;
+- paired-run tests proving the same scenario/configuration is used for baseline
+  and treatment except for the declared memory difference;
+- regression tests for false attribution, where a task improves for an
+  unrelated reason or a retrieved card is present but not followed;
+- a small smoke suite that runs in CI without network/model credentials, plus
+  an opt-in live suite for real model comparisons.
+
+**Exit gate:** the project can answer, with reproducible evidence, whether a
+  card or retrieval policy changes success, cost, latency, verification, and
+  safety outcomes on held-out tasks. The evaluation harness becomes a required
+  dependency for Milestones 5 and 6.
+
+### Milestone 5 — Offline proposer and candidate artifacts
+
+**Intent:** use Codex itself, a focused Skill, or an offline model call to
+  propose better lessons and operating guidance without giving that proposer
+  direct control of the live agent.
+
+**Deliverables:**
+
+- Define a versioned `ImprovementCandidate` envelope containing candidate type,
+  target scope, evidence IDs, rationale, expected benefit, expected costs and
+  risks, proposed diff/content, validation commands, and expiry/rollback
+  metadata. Candidate types should include:
+  - experience-card update;
+  - focused Skill change;
+  - repository `AGENTS.md` patch;
+  - prompt/extension configuration change; and
+  - diagnostic/tooling issue that should be fixed in Codex code.
+- Start with the `agent-card-curator` Skill as the user-facing proposer. It
+  can summarize candidates, ask Codex to draft a bounded improvement, and
+  produce a reviewable artifact. Add a dedicated offline proposer command only
+  after the candidate schema and evaluator are stable.
+- Keep the proposer on the slow path: it may read reduced, redacted evidence
+  and selected trace references, but it must not run in every turn or alter
+  permissions, approval policy, sandbox policy, system instructions, or
+  repository files as a side effect.
+- Validate model output against a strict schema, reject prompt-injection-like
+  instructions and unbounded content, and require a concrete regression test
+  or evaluation scenario for any behavioral candidate.
+- For code or repository-guidance candidates, emit a diff in an isolated
+  worktree. Do not apply it to the user's checkout automatically.
+
+**Tests and verification:**
+
+- fake proposer outputs for valid, malformed, oversized, contradictory, and
+  adversarial candidates;
+- schema validation and redaction tests for every candidate type;
+- tests proving candidate generation is read-only with respect to the live
+  Codex configuration and repository;
+- evaluator integration tests proving a candidate references real evidence and
+  executable checks;
+- curator Skill tests for explicit approval, rejection, and cancellation.
+
+**Exit gate:** a proposer can generate reviewable, evidence-linked artifacts
+  and a test plan. No proposed artifact influences live behavior until the
+  Milestone 6 control plane accepts it.
+
+### Milestone 6 — Promotion, rollback, and policy control plane
+
+**Intent:** make improvement reversible and scoped when evidence justifies
+  moving it from a candidate into active knowledge.
+
+**Deliverables:**
+
+- Add a versioned state machine:
+
+  ```text
+  proposed -> validated -> evaluated -> accepted -> active -> retired
+                 \-> rejected
+  ```
+
+  Every transition records actor, timestamp, evidence, evaluator result, scope,
+  and previous version. State transitions are append-only or recoverable; the
+  active index can be rebuilt from the log.
+- Add explicit commands for `validate`, `evaluate`, `promote`, `rollback`,
+  `retire`, and `status`. `promote` must refuse candidates without required
+  evaluation evidence or an explicit documented override.
+- Keep cards, Skills, `AGENTS.md` patches, and configuration changes in
+  separate promotion lanes. A card may become active retrieval context; a
+  repository guidance patch requires a normal diff review; a permission or
+  sandbox change is never promoted by this subsystem.
+- Add per-repository and per-task-family policy scopes, TTLs, kill switches,
+  and a one-command rollback to the previous active version. A failed store or
+  policy lookup falls back to the last known safe behavior or disabled mode.
+- Preserve provenance from active context back to the candidate, trace IDs,
+  evaluator runs, and human decision. Render this provenance in inspection
+  output so a user can explain why a card was shown.
+
+**Tests and verification:**
+
+- state-machine transition and recovery tests, including crashes between log
+  append and index update;
+- promotion-gate tests for missing evidence, regression, expired candidate,
+  scope mismatch, and stale schema;
+- rollback tests proving the previous active policy is restored without
+  rewriting unrelated cards;
+- permission-boundary tests proving promoted content cannot grant tools,
+  bypass approvals, change sandboxing, or outrank repository/system
+  instructions;
+- end-to-end baseline/active/rollback evaluation tests.
+
+**Exit gate:** every active improvement is attributable, scoped, measurable,
+  and reversible. Manual promotion is the only supported promotion mode at
+  first. Any future automatic promotion must be a separately gated experiment,
+  disabled by default.
+
+### Milestone 7 — Slow loop for long-horizon improvement
+
+**Intent:** capture the Meta^n-style slow loop: review a history of attempts,
+  identify repeated patterns or stagnation, and propose the next targeted
+  experiment rather than repeatedly storing near-duplicate cards.
+
+**Deliverables:**
+
+- Add an explicit/manual or scheduled `evolve` operation that operates on
+  aggregate local evidence, not on the live turn hot path. It should identify
+  recurring failure signatures, repeated verification omissions, cards that are
+  frequently retrieved but not followed, conflicting recommendations, and
+  task families with no useful coverage.
+- Cluster and summarize episodes into experiment briefs containing the problem,
+  evidence, competing hypotheses, candidate changes, expected metric, and
+  evaluation set. The slow loop proposes; it does not promote.
+- Add bounded memory maintenance: duplicate merge, stale-card decay, negative
+  feedback, retention limits, archive/export, and explicit forgetting. Make
+  scope and repository identity part of clustering to prevent cross-project
+  contamination.
+- Track experiment history and stagnation. If a candidate repeatedly fails to
+  improve held-out outcomes, lower its priority or retire it instead of
+  endlessly retrying.
+- Allow the proposer instruction set to be updated only through the same
+  candidate/evaluation/promotion path. Do not let a successful experiment
+  silently rewrite its own evaluator.
+
+**Tests and verification:**
+
+- deterministic clustering and duplicate/contradiction fixtures;
+- bounded-budget tests for number of traces, cards, model calls, tokens, and
+  wall time examined by one evolution run;
+- stale/negative-feedback/forgetting tests;
+- cross-repository and cross-task-family isolation tests;
+- tests proving slow-loop output is a candidate/experiment brief and cannot
+  alter active behavior without Milestone 6 promotion;
+- repeated-run determinism tests for the non-model aggregation layer.
+
+**Exit gate:** a long history can produce a small, explainable set of new
+experiments with provenance, and the system can stop pursuing unproductive
+ideas. There must be evidence of improved held-out outcomes before calling the
+slow loop “learning.”
+
+### Milestone 8 — Optional program-level evolution and transfer (research)
+
+**Intent:** explore the strongest Meta^n idea—evolving the agent harness or
+operating program itself—only after the safer memory and evaluation loops have
+earned enough evidence.
+
+**Possible scope:**
+
+- generate candidate versions of a Skill, prompt template, extension routing
+  rule, or repository guidance patch in isolated worktrees;
+- evaluate candidate versions against a broad regression suite, held-out task
+  families, safety fixtures, and cost budgets;
+- study transfer between repositories and task families, including negative
+  transfer, forgetting, stale guidance, and evaluator overfitting;
+- support multi-step evolution budgets with checkpoints and automatic abort on
+  regression, while retaining human review before activation.
+
+**Hard exclusions:** no direct mutation of the live Codex binary, no arbitrary
+generated code execution outside the existing sandbox/approval model, no
+automatic change to system/developer instructions, and no acceptance based on
+one benchmark or one judge score.
+
+**Exit gate:** this milestone is optional and should not be started merely
+because the machinery is available. It requires a historical benchmark,
+reproducible holdout gains, bounded compute/cost, no safety regression, a
+rollback demonstration, and explicit human approval of the evaluation and
+candidate scope. Otherwise the project should stop at Milestone 7.
+
+### Cross-milestone requirements
+
+Every milestone must preserve the following invariants:
+
+- **Default safety:** disabled means no capture, retrieval, model calls, or
+  behavior change from this subsystem.
+- **Separation of planes:** observation, candidate generation, evaluation,
+  active retrieval, and promotion are separate states and stores.
+- **Evidence before attribution:** exposure is not adoption; adoption is not
+  success; success is not generalization.
+- **Bounded local state:** enforce limits on bytes, records, fields, model
+  calls, tokens, wall time, and concurrent work.
+- **No authority escalation:** historical experience can suggest, never grant
+  permissions or override instruction hierarchy.
+- **Reproducibility:** record versions, configuration, task scope, evaluator,
+  and source trace IDs for every measured result.
+- **Reversibility:** active changes have a stable identity, predecessor, TTL or
+  retirement path, and a tested rollback.
+- **Privacy by construction:** raw prompts, model responses, terminal output,
+  secrets, and arbitrary paths remain out of durable improvement artifacts
+  unless a separate, explicit diagnostic workflow authorizes them.
+- **Cost awareness:** measure context tokens, model calls, tool calls, runtime,
+  and storage. An improvement that wins task success by disproportionate cost
+  is not automatically an improvement.
+
+### Recommended execution order
+
+The practical implementation order is:
+
+1. Use Milestone 1 manually for real repeated Codex work and collect a small,
+   reviewed set of examples.
+2. Implement Milestone 2 so candidate capture becomes automatic but review
+   remains human-controlled.
+3. Implement Milestone 3 only where the examples show that coarse cards are
+   insufficient; avoid adding fields without a retrieval or evaluation use.
+4. Build Milestone 4 before accepting any claim that memory improves the
+   agent.
+5. Add Milestone 5 as a focused Skill first, then a model-backed offline
+   proposer if the Skill workflow is valuable and safe.
+6. Implement Milestone 6 before enabling any non-manual promotion.
+7. Add Milestone 7 for periodic local improvement and stop there unless the
+   measured evidence justifies Milestone 8.
+
+The first useful product loop after the completed foundation is therefore:
+
+```text
+automatic candidate -> curator review -> active card -> paired evaluation
+       ^                                      |
+       |                                      v
+       +------------- measured next trace ---+
+```
+
+## Architecture
+
+Add one extension crate, `codex-agent-improvement-extension`, with four small
+responsibilities:
+
+1. **Schema**: serializable `ExperienceCard`, evidence counters, task-family
+   labels, and failure classes.
+2. **Summarizer**: deterministic conversion from a reduced `RolloutTrace` into
+   one privacy-bounded card.
+3. **Store**: append-only JSONL persistence under
+   `$CODEX_HOME/agent-improvement/cards.jsonl`, with bounded lexical retrieval
+   and deterministic ordering.
+4. **Prompt integration**: an opt-in extension that selects relevant cards from
+   the current user input and injects them as clearly marked advisory user
+   context. Cards are not developer policy and cannot override user, system,
+   safety, or repository instructions.
+
+Add a CLI command:
+
+```text
+codex debug agent-improvement summarize <TRACE_BUNDLE> [--store <DIR>] [--output <FILE>]
+codex debug agent-improvement render --store <DIR> --query <TEXT>
+```
+
+The first command replays an existing bundle and emits one card. `--store` is
+explicit so users do not accidentally persist sensitive material. The second
+command is a read-only inspection tool for verifying retrieval and prompt-sized
+rendering.
+
+## Data contract
+
+`ExperienceCard` must contain only bounded, derived information:
+
+- schema version and deterministic card ID;
+- source trace ID and source timestamp;
+- coarse task family;
+- failure class;
+- counts for turns, inferences, tools, terminal operations, failed operations,
+  and token usage;
+- bounded fixed command/tool activity labels, not full stdout/stderr;
+- bounded opaque hashes of normalized task terms for useful retrieval without
+  storing those terms as card text;
+- a short evidence summary;
+- a deterministic recommended next step;
+- a verification summary;
+- no raw prompt, response, path, secret, or terminal output by default.
+
+Failure classification must be deterministic and explainable. Initial classes:
+
+- `completed`;
+- `command_failure`;
+- `tool_failure`;
+- `model_failure`;
+- `policy_blocked`;
+- `cancelled`;
+- `incomplete_verification`;
+- `unknown`.
+
+Initial task families are coarse and intentionally conservative:
+
+- `coding`;
+- `testing`;
+- `review`;
+- `planning`;
+- `investigation`;
+- `documentation`;
+- `general`.
+
+## Configuration and safety
+
+Add an `[agent_improvement]` configuration block with:
+
+```toml
+[agent_improvement]
+enabled = false
+max_cards = 8
+max_context_tokens = 1200
+```
+
+The effective default is disabled. When enabled:
+
+- only `$CODEX_HOME/agent-improvement/cards.jsonl` is read;
+- missing or malformed cards are skipped with a bounded warning;
+- oversized stores, lines, and card fields are rejected or skipped within
+  fixed local resource limits;
+- card content is truncated before prompt insertion;
+- the prompt explicitly labels cards as historical, advisory, and untrusted;
+- no card can change tool permissions, approval policy, sandbox policy, or
+  instruction precedence;
+- failures to read the store never fail a Codex turn.
+
+The summarizer reads reduced trace state and does not need to read raw payloads.
+This keeps the default card path safer than replaying raw prompts or terminal
+output into future context.
+
+## Milestone 1 implementation tasks (complete)
+
+Each task has a red/green/verification checkpoint and must be completed before
+starting the next task.
+
+### Task 0 — Record and validate this plan
+
+Files:
+
+- `docs/agent-improvement-integration-plan.md`
+
+Acceptance:
+
+- plan is committed to the working tree before code changes;
+- scope, non-goals, safety, data contract, test plan, and promotion gates are
+  explicit;
+- the plan is updated as implementation progresses.
+
+Verification:
+
+```text
+git diff --check
+```
+
+Status: complete. The file exists and `git diff --check` passes.
+
+### Task 1 — Add configuration types with a disabled default
+
+Files:
+
+- `codex-rs/config/src/config_toml.rs`
+- `codex-rs/config/src/types.rs`
+- `codex-rs/config/src/types_tests.rs`
+- `codex-rs/config/src/lib.rs` if exports are required
+- `codex-rs/core/src/config/mod.rs`
+- relevant schema/config tests
+
+Red:
+
+- config parsing test for `[agent_improvement]`;
+- default and clamping tests;
+- assert effective `Config` carries the resolved settings.
+
+Green:
+
+- add `AgentImprovementToml` and `AgentImprovementConfig`;
+- default `enabled = false`;
+- clamp card count and context budget to safe non-zero bounds;
+- thread the effective value through `Config`.
+
+Verification:
+
+```text
+cargo test -p codex-config agent_improvement
+cargo test -p codex-core config
+```
+
+### Task 2 — Implement the pure experience-card schema and store
+
+Files:
+
+- `codex-rs/ext/agent-improvement/Cargo.toml`
+- `codex-rs/ext/agent-improvement/BUILD.bazel`
+- `codex-rs/ext/agent-improvement/src/lib.rs`
+- `codex-rs/ext/agent-improvement/src/schema.rs`
+- `codex-rs/ext/agent-improvement/src/store.rs`
+- `codex-rs/ext/agent-improvement/src/store_tests.rs`
+- workspace manifests and Bazel registration
+
+Red:
+
+- JSON round-trip test, including opaque retrieval keys;
+- deterministic card-ID test;
+- append/read test using a temporary directory;
+- malformed-line tolerance test;
+- lexical and topic relevance, tie-breaking, card count, and byte/token-bound
+  tests.
+
+Green:
+
+- implement bounded serializable cards with fixed activity labels and opaque
+  topic hashes;
+- implement append-only JSONL storage;
+- implement deterministic, relevance-bounded selection;
+- never include raw prompt or terminal output in the card schema.
+
+Verification:
+
+```text
+cargo test -p codex-agent-improvement-extension
+```
+
+### Task 3 — Deterministically summarize reduced rollout traces
+
+Files:
+
+- `codex-rs/ext/agent-improvement/src/summarize.rs`
+- `codex-rs/ext/agent-improvement/src/summarize_tests.rs`
+
+Red:
+
+- synthetic reduced-trace tests for completed work;
+- non-zero terminal exit classification;
+- failed tool classification;
+- cancelled/aborted classification;
+- policy-blocked signal classification;
+- task-family classification;
+- verification recommendation behavior.
+
+Green:
+
+- summarize `codex_rollout_trace::RolloutTrace` without model calls;
+- derive evidence from reduced runtime objects;
+- use bounded labels and counters;
+- make recommendations deterministic and explainable.
+
+Verification:
+
+```text
+cargo test -p codex-agent-improvement-extension summarize
+```
+
+### Task 4 — Add the debug CLI commands
+
+Files:
+
+- `codex-rs/cli/Cargo.toml`
+- `codex-rs/cli/src/main.rs`
+- CLI parser/command tests
+
+Red:
+
+- parser tests for both subcommands and required arguments;
+- command test proving a reduced trace produces stable JSON;
+- explicit `--store` test proving persistence is opt-in.
+
+Green:
+
+- add `codex debug agent-improvement summarize`;
+- add `codex debug agent-improvement render`;
+- preserve non-zero errors for missing/invalid trace bundles;
+- keep stdout JSON stable and machine-readable.
+
+Verification:
+
+```text
+cargo test -p codex-cli
+```
+
+### Task 5 — Inject relevant cards through the extension system
+
+Files:
+
+- `codex-rs/ext/agent-improvement/src/extension.rs`
+- extension tests
+- `codex-rs/app-server/src/extensions.rs`
+- `codex-rs/app-server/Cargo.toml`
+- CLI debug prompt registry setup
+- `codex-rs/core/src/prompt_debug.rs`
+- `codex-rs/core/src/session/turn.rs`
+
+Red:
+
+- disabled configuration contributes no fragments;
+- enabled configuration with no store contributes no fragments;
+- query selects relevant cards only;
+- output is bounded and marked advisory/untrusted;
+- store read errors do not fail turn preparation.
+
+Green:
+
+- implement a `TurnInputContributor` using current user input;
+- render the selected cards as user-role contextual content;
+- install the extension in the app-server registry;
+- install it in debug prompt construction so prompt inspection is honest.
+
+Verification:
+
+```text
+cargo test -p codex-agent-improvement-extension
+cargo test -p codex-app-server extensions
+cargo test -p codex-cli prompt
+```
+
+### Task 6 — Add user-facing documentation and operational gates
+
+Files:
+
+- `docs/agent-improvement.md`
+- `docs/config.md` or the repository's appropriate configuration reference
+- `codex-rs/ext/agent-improvement/README.md` if useful
+
+Document:
+
+- how to enable the feature;
+- how to create a card from a local rollout trace;
+- where data is stored;
+- why raw prompts and outputs are excluded;
+- how to inspect and delete cards;
+- how to review a card before allowing it to influence future work;
+- that card retrieval is not an eval or a guarantee of correctness.
+
+Verification:
+
+```text
+git diff --check
+```
+
+### Task 7 — Full validation and handoff
+
+Run the narrow tests for every changed crate, then the repository's appropriate
+Rust and Bazel checks when toolchains are available. Record unavailable checks
+instead of claiming success.
+
+The final review must explicitly compare:
+
+- behavior disabled vs enabled;
+- no-card vs relevant-card context;
+- completed vs failed vs cancelled traces;
+- single-card vs many-card retrieval;
+- malformed and oversized local data;
+- privacy of generated card JSON;
+- prompt precedence and safety boundaries.
+
+## Validation notes
+
+The focused validation completed with these results:
+
+- `cargo test -p codex-config agent_improvement`: 2 passed;
+- `cargo test -p codex-core --lib load_config_resolves_agent_improvement_settings`: 1 passed;
+- `cargo test -p codex-agent-improvement-extension`: 22 passed;
+- `cargo test -p codex-cli --test agent_improvement`: 2 passed;
+- `cargo test -p codex-cli debug_agent_improvement`: 2 parser tests passed;
+- `cargo test -p codex-app-server extensions`: 6 unit tests and 2 filtered
+  integration tests passed;
+- `cargo check -p codex-thread-manager-sample`: passed;
+- `cargo fmt --all -- --check` and `git diff --check`: passed.
+
+An earlier broader `cargo test -p codex-core config` run compiled the target
+and then aborted in the unrelated existing
+`tools::handlers::multi_agents::tests::multi_agent_v2_spawn_agent_ignores_configured_max_depth`
+test with a stack overflow. It is not claimed as a green repository-wide
+check. Bazel was also not run because neither `bazel` nor `bazelisk` is
+available in this environment; the Bazel target was added and should be run in
+CI or a checkout with that toolchain.
+
+## Cross-milestone promotion gates
+
+This first integration is deliberately deterministic. Any future generated
+strategy, Skill, AGENTS.md change, or prompt change must pass all of these gates:
+
+1. observed trace evidence identifies the problem;
+2. the proposed change is narrowly scoped;
+3. a deterministic regression test exists;
+4. the change improves a held-out task set or reduces measured failure/cost;
+5. no existing task family regresses beyond an agreed threshold;
+6. the change stays within permission, privacy, and instruction boundaries;
+7. a human reviews the final diff before promotion.
+
+Keep routed/per-task-best results separate from single-policy results. A card
+that helps one task must not be treated as a general Codex improvement without
+cross-task evidence.
+
+## Implementation log
+
+| Task | Status | Evidence |
+| --- | --- | --- |
+| 0. Plan | complete | This file; `git diff --check` |
+| 1. Configuration | complete | Config and effective-value tests; focused core resolution test |
+| 2. Schema/store | complete | 22 extension tests cover schema, persistence, topic ranking, resource bounds, and malformed data |
+| 3. Trace summarizer | complete | Deterministic reduced-trace tests cover completed, command/tool/model/policy/cancelled/incomplete outcomes |
+| 4. Debug CLI | complete | Parser tests plus end-to-end summarize/render and explicit-persistence test |
+| 5. Prompt integration | complete | App-server registry test, extension tests, and end-to-end debug prompt-input injection test |
+| 6. Documentation | complete | docs/agent-improvement.md; formatting and diff checks |
+| 7. Full validation | complete | Focused config/core/extension/CLI/app-server tests, formatting, and diff checks; one unrelated pre-existing core stack-overflow test remains documented in the handoff |

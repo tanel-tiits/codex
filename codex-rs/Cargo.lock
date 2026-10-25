@@ -1934,6 +1934,25 @@ dependencies = [
 ]
 
 [[package]]
+name = "codex-agent-improvement-extension"
+version = "0.0.0"
+dependencies = [
+ "codex-context-fragments",
+ "codex-core",
+ "codex-extension-api",
+ "codex-protocol",
+ "codex-rollout-trace",
+ "codex-utils-string",
+ "pretty_assertions",
+ "serde",
+ "serde_json",
+ "sha2 0.10.9",
+ "tempfile",
+ "tokio",
+ "tracing",
+]
+
+[[package]]
 name = "codex-agent-message-board-client"
 version = "0.0.0"
 dependencies = [
@@ -2066,6 +2085,7 @@ dependencies = [
  "chrono",
  "clap",
  "codex-agent-extension",
+ "codex-agent-improvement-extension",
  "codex-analytics",
  "codex-app-server-daemon",
  "codex-app-server-protocol",
@@ -2506,6 +2526,7 @@ dependencies = [
  "chrono",
  "clap",
  "clap_complete",
+ "codex-agent-improvement-extension",
  "codex-api",
  "codex-app-server",
  "codex-app-server-client",

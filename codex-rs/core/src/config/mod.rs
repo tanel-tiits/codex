@@ -39,6 +39,7 @@ use codex_config::loader::project_trust_key;
 use codex_config::permissions_toml::PermissionProfileToml;
 use codex_config::permissions_toml::PermissionsToml;
 use codex_config::sandbox_mode_requirement_for_permission_profile;
+use codex_config::types::AgentImprovementConfig;
 use codex_config::types::ApprovalsReviewer;
 use codex_config::types::AuthCredentialsStoreMode;
 use codex_config::types::AuthKeyringBackendKind;
@@ -992,6 +993,9 @@ pub struct Config {
 
     /// Memories subsystem settings.
     pub memories: MemoriesConfig,
+
+    /// Opt-in local agent improvement settings.
+    pub agent_improvement: AgentImprovementConfig,
 
     /// Directory containing all Codex state (defaults to `~/.codex` but can be
     /// overridden by the `CODEX_HOME` environment variable).
@@ -3670,6 +3674,11 @@ impl Config {
         }
         let memories_config: MemoriesConfig = memories.into();
         let memories_root = codex_home.join(memories_config.version.directory_name());
+        let agent_improvement_config: AgentImprovementConfig = cfg
+            .agent_improvement
+            .clone()
+            .unwrap_or_default()
+            .into();
 
         let profiles_are_active = effective_permission_selection.profiles_are_active(
             default_permissions_override.as_deref(),
@@ -4586,6 +4595,7 @@ impl Config {
                 })
                 .transpose()?,
             memories: memories_config,
+            agent_improvement: agent_improvement_config,
             agent_interrupt_message_enabled,
             codex_home,
             sqlite,

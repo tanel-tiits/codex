@@ -3,6 +3,11 @@ use clap::CommandFactory;
 use clap::Parser;
 use clap_complete::Shell;
 use clap_complete::generate;
+use codex_agent_improvement_extension::append_card;
+use codex_agent_improvement_extension::load_cards;
+use codex_agent_improvement_extension::render_cards;
+use codex_agent_improvement_extension::select_relevant;
+use codex_agent_improvement_extension::summarize_rollout;
 use codex_app_server_daemon::BootstrapOptions as AppServerBootstrapOptions;
 use codex_app_server_daemon::LifecycleCommand as AppServerLifecycleCommand;
 use codex_app_server_daemon::RemoteControlMode as AppServerRemoteControlMode;
@@ -273,6 +278,9 @@ enum DebugSubcommand {
     /// Render the model-visible prompt input list as JSON.
     PromptInput(DebugPromptInputCommand),
 
+    /// Inspect and render local agent-improvement experience cards.
+    AgentImprovement(DebugAgentImprovementCommand),
+
     /// Replay a rollout trace bundle and write reduced state JSON.
     #[clap(hide = true)]
     TraceReduce(DebugTraceReduceCommand),
@@ -316,6 +324,55 @@ struct DebugModelsCommand {
     /// Skip refresh and dump only the bundled catalog shipped with this binary.
     #[arg(long = "bundled", default_value_t = false)]
     bundled: bool,
+}
+
+#[derive(Debug, Parser)]
+struct DebugAgentImprovementCommand {
+    #[command(subcommand)]
+    subcommand: DebugAgentImprovementSubcommand,
+}
+
+#[derive(Debug, clap::Subcommand)]
+enum DebugAgentImprovementSubcommand {
+    /// Summarize a local rollout bundle into one bounded experience card.
+    Summarize(DebugAgentImprovementSummarizeCommand),
+
+    /// Render relevant local experience cards for a prospective task.
+    Render(DebugAgentImprovementRenderCommand),
+}
+
+#[derive(Debug, Parser)]
+struct DebugAgentImprovementSummarizeCommand {
+    /// Trace bundle directory containing manifest.json and trace.jsonl.
+    #[arg(value_name = "TRACE_BUNDLE")]
+    trace_bundle: PathBuf,
+
+    /// Persist the derived card in this directory. Omit to keep the command read-only.
+    #[arg(long = "store", value_name = "DIR")]
+    store: Option<PathBuf>,
+
+    /// Also write the card JSON to this file.
+    #[arg(long = "output", short = 'o', value_name = "FILE")]
+    output: Option<PathBuf>,
+}
+
+#[derive(Debug, Parser)]
+struct DebugAgentImprovementRenderCommand {
+    /// Experience-card store directory containing cards.jsonl.
+    #[arg(long = "store", value_name = "DIR", required = true)]
+    store: PathBuf,
+
+    /// Current task text used for deterministic lexical retrieval.
+    #[arg(long = "query", value_name = "TEXT", required = true)]
+    query: String,
+
+    /// Maximum cards to render.
+    #[arg(long = "max-cards", default_value_t = codex_config::types::DEFAULT_AGENT_IMPROVEMENT_MAX_CARDS)]
+    max_cards: usize,
+
+    /// Maximum rendered context budget in tokens.
+    #[arg(long = "max-context-tokens", default_value_t = codex_config::types::DEFAULT_AGENT_IMPROVEMENT_MAX_CONTEXT_TOKENS)]
+    max_context_tokens: usize,
 }
 
 #[derive(Debug, Parser)]
@@ -1852,6 +1909,21 @@ async fn cli_main(
                 )
                 .await?;
             }
+            DebugSubcommand::AgentImprovement(DebugAgentImprovementCommand { subcommand }) => {
+                reject_remote_mode_for_subcommand(
+                    root_remote.as_deref(),
+                    root_remote_auth_token_env.as_deref(),
+                    "debug agent-improvement",
+                )?;
+                match subcommand {
+                    DebugAgentImprovementSubcommand::Summarize(cmd) => {
+                        run_debug_agent_improvement_summarize_command(cmd).await?;
+                    }
+                    DebugAgentImprovementSubcommand::Render(cmd) => {
+                        run_debug_agent_improvement_render_command(cmd)?;
+                    }
+                }
+            }
             DebugSubcommand::TraceReduce(cmd) => {
                 reject_remote_mode_for_subcommand(
                     root_remote.as_deref(),
@@ -2084,6 +2156,32 @@ async fn run_debug_trace_reduce_command(cmd: DebugTraceReduceCommand) -> anyhow:
     Ok(())
 }
 
+async fn run_debug_agent_improvement_summarize_command(
+    cmd: DebugAgentImprovementSummarizeCommand,
+) -> anyhow::Result<()> {
+    let trace = replay_bundle(&cmd.trace_bundle)?;
+    let card = summarize_rollout(&trace);
+    if let Some(store) = cmd.store {
+        append_card(&store, &card)?;
+    }
+
+    let card_json = serde_json::to_vec_pretty(&card)?;
+    if let Some(output) = cmd.output {
+        tokio::fs::write(output, &card_json).await?;
+    }
+    println!("{}", String::from_utf8(card_json)?);
+    Ok(())
+}
+
+fn run_debug_agent_improvement_render_command(
+    cmd: DebugAgentImprovementRenderCommand,
+) -> anyhow::Result<()> {
+    let cards = load_cards(&cmd.store)?;
+    let selected = select_relevant(&cards, &cmd.query, cmd.max_cards);
+    println!("{}", render_cards(&selected, cmd.max_context_tokens));
+    Ok(())
+}
+
 async fn run_debug_prompt_input_command(
     cmd: DebugPromptInputCommand,
     root_config_overrides: CliConfigOverrides,
@@ -2158,6 +2256,7 @@ async fn run_debug_prompt_input_command(
     {
         codex_multi_env_copy_file::install(&mut extensions);
     }
+    codex_agent_improvement_extension::install(&mut extensions);
     codex_git_attribution::install(
         &mut extensions,
         auth_manager,
@@ -3540,6 +3639,70 @@ enabled = true
         };
 
         assert!(cmd.bundled);
+    }
+
+    #[test]
+    fn debug_agent_improvement_summarize_parses_optional_outputs() {
+        let cli = MultitoolCli::try_parse_from([
+            "codex",
+            "debug",
+            "agent-improvement",
+            "summarize",
+            "/tmp/trace-bundle",
+            "--store",
+            "/tmp/cards",
+            "--output",
+            "/tmp/card.json",
+        ])
+        .expect("parse");
+
+        let Some(Subcommand::Debug(DebugCommand {
+            subcommand:
+                DebugSubcommand::AgentImprovement(DebugAgentImprovementCommand {
+                    subcommand: DebugAgentImprovementSubcommand::Summarize(cmd),
+                }),
+        })) = cli.subcommand
+        else {
+            panic!("expected debug agent-improvement summarize subcommand");
+        };
+
+        assert_eq!(cmd.trace_bundle, PathBuf::from("/tmp/trace-bundle"));
+        assert_eq!(cmd.store, Some(PathBuf::from("/tmp/cards")));
+        assert_eq!(cmd.output, Some(PathBuf::from("/tmp/card.json")));
+    }
+
+    #[test]
+    fn debug_agent_improvement_render_parses_bounded_query_options() {
+        let cli = MultitoolCli::try_parse_from([
+            "codex",
+            "debug",
+            "agent-improvement",
+            "render",
+            "--store",
+            "/tmp/cards",
+            "--query",
+            "fix parser tests",
+            "--max-cards",
+            "3",
+            "--max-context-tokens",
+            "640",
+        ])
+        .expect("parse");
+
+        let Some(Subcommand::Debug(DebugCommand {
+            subcommand:
+                DebugSubcommand::AgentImprovement(DebugAgentImprovementCommand {
+                    subcommand: DebugAgentImprovementSubcommand::Render(cmd),
+                }),
+        })) = cli.subcommand
+        else {
+            panic!("expected debug agent-improvement render subcommand");
+        };
+
+        assert_eq!(cmd.store, PathBuf::from("/tmp/cards"));
+        assert_eq!(cmd.query, "fix parser tests");
+        assert_eq!(cmd.max_cards, 3);
+        assert_eq!(cmd.max_context_tokens, 640);
     }
 
     #[test]
