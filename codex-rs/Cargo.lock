@@ -1937,6 +1937,7 @@ dependencies = [
 name = "codex-agent-improvement-extension"
 version = "0.0.0"
 dependencies = [
+ "codex-config",
  "codex-context-fragments",
  "codex-core",
  "codex-extension-api",

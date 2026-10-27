@@ -149,6 +149,8 @@ fn agent_improvement_is_opt_in_and_clamps_context_limits() {
             enabled: false,
             max_cards: 8,
             max_context_tokens: 1_200,
+            capture: AgentImprovementCaptureMode::Off,
+            max_candidates: 64,
         }
     );
 
@@ -156,10 +158,14 @@ fn agent_improvement_is_opt_in_and_clamps_context_limits() {
         enabled: Some(true),
         max_cards: Some(0),
         max_context_tokens: Some(99_999),
+        capture: Some(AgentImprovementCaptureMode::Candidate),
+        max_candidates: Some(999),
     });
     assert_eq!(config.enabled, true);
     assert_eq!(config.max_cards, 1);
     assert_eq!(config.max_context_tokens, 8_000);
+    assert_eq!(config.capture, AgentImprovementCaptureMode::Candidate);
+    assert_eq!(config.max_candidates, 256);
 }
 
 #[test]

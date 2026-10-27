@@ -1,11 +1,20 @@
+use codex_config::types::AgentImprovementCaptureMode;
 use codex_context_fragments::ContextualUserFragment;
 use codex_extension_api::ExtensionData;
 use codex_extension_api::ExtensionRegistryBuilder;
+use codex_extension_api::ThreadLifecycleContributor;
+use codex_extension_api::ThreadStopInput;
 use codex_extension_api::TurnInputContext;
 use codex_extension_api::TurnInputContributor;
+use codex_extension_api::TurnLifecycleContributor;
+use codex_extension_api::TurnStopInput;
 use codex_protocol::models::ContentItem;
+use codex_protocol::protocol::SessionSource;
 use codex_protocol::user_input::UserInput;
+use codex_rollout_trace::ThreadStartedTraceMetadata;
+use codex_rollout_trace::ThreadTraceContext;
 use pretty_assertions::assert_eq;
+use std::path::PathBuf;
 
 use super::extension::{
     AgentImprovementExtension, AgentImprovementExtensionConfig, TEST_ADVISORY_CONTEXT_PREFIX,
@@ -19,6 +28,19 @@ fn config(root: &std::path::Path, enabled: bool) -> AgentImprovementExtensionCon
         root: root.to_path_buf(),
         max_cards: 8,
         max_context_tokens: 1_200,
+        capture: AgentImprovementCaptureMode::Off,
+        max_candidates: 8,
+    }
+}
+
+fn capture_config(root: &std::path::Path) -> AgentImprovementExtensionConfig {
+    AgentImprovementExtensionConfig {
+        enabled: false,
+        root: root.to_path_buf(),
+        max_cards: 8,
+        max_context_tokens: 1_200,
+        capture: AgentImprovementCaptureMode::Candidate,
+        max_candidates: 8,
     }
 }
 
@@ -123,11 +145,145 @@ async fn store_read_errors_do_not_fail_turn_preparation() {
 }
 
 #[tokio::test]
+async fn turn_stop_captures_a_pending_candidate_while_thread_remains_open() {
+    let tempdir = tempfile::tempdir().expect("tempdir");
+    let trace_root = tempdir.path().join("traces");
+    let store_root = tempdir.path().join("state");
+    let trace = ThreadTraceContext::start_root_in_root_for_test(
+        &trace_root,
+        ThreadStartedTraceMetadata {
+            thread_id: "thread-root".to_string(),
+            agent_path: "/root".to_string(),
+            task_name: None,
+            nickname: None,
+            agent_role: None,
+            session_source: SessionSource::Exec,
+            cwd: PathBuf::from("/workspace"),
+            rollout_path: None,
+            model: "test-model".to_string(),
+            provider_name: "test-provider".to_string(),
+            approval_policy: "never".to_string(),
+            sandbox_policy: "read-only".to_string(),
+        },
+    )
+    .expect("start trace");
+    trace.record_codex_turn_started("turn-1");
+
+    let extension = AgentImprovementExtension;
+    let session_store = ExtensionData::new("session");
+    let thread_store = ExtensionData::new("thread-root");
+    let turn_store = ExtensionData::new("turn-1");
+    thread_store.insert(capture_config(&store_root));
+    thread_store.insert(trace);
+
+    extension
+        .on_turn_stop(TurnStopInput {
+            session_store: &session_store,
+            thread_store: &thread_store,
+            turn_store: &turn_store,
+        })
+        .await;
+
+    let candidates = super::candidates::load_candidates(&store_root).expect("load candidates");
+    assert_eq!(candidates.len(), 1);
+    assert_eq!(candidates[0].trigger, super::CandidateTrigger::TurnStop);
+    assert_eq!(candidates[0].source_turn_id.as_deref(), Some("turn-1"));
+    assert!(!store_root.join("cards.jsonl").exists());
+}
+
+#[tokio::test]
+async fn thread_stop_captures_a_pending_candidate_without_activating_a_card() {
+    let tempdir = tempfile::tempdir().expect("tempdir");
+    let trace_root = tempdir.path().join("traces");
+    let store_root = tempdir.path().join("state");
+    let trace = ThreadTraceContext::start_root_in_root_for_test(
+        &trace_root,
+        ThreadStartedTraceMetadata {
+            thread_id: "thread-root".to_string(),
+            agent_path: "/root".to_string(),
+            task_name: None,
+            nickname: None,
+            agent_role: None,
+            session_source: SessionSource::Exec,
+            cwd: PathBuf::from("/workspace"),
+            rollout_path: None,
+            model: "test-model".to_string(),
+            provider_name: "test-provider".to_string(),
+            approval_policy: "never".to_string(),
+            sandbox_policy: "read-only".to_string(),
+        },
+    )
+    .expect("start trace");
+    trace.record_codex_turn_started("turn-1");
+
+    let extension = AgentImprovementExtension;
+    let session_store = ExtensionData::new("session");
+    let thread_store = ExtensionData::new("thread-root");
+    thread_store.insert(capture_config(&store_root));
+    thread_store.insert(trace);
+
+    extension
+        .on_thread_stop(ThreadStopInput {
+            session_store: &session_store,
+            thread_store: &thread_store,
+        })
+        .await;
+
+    let candidates = super::candidates::load_candidates(&store_root).expect("load candidates");
+    assert_eq!(candidates.len(), 1);
+    assert_eq!(candidates[0].status, super::CandidateStatus::Pending);
+    assert!(!store_root.join("cards.jsonl").exists());
+}
+
+#[tokio::test]
+async fn candidate_capture_store_errors_do_not_escape_thread_stop() {
+    let tempdir = tempfile::tempdir().expect("tempdir");
+    let trace_root = tempdir.path().join("traces");
+    let store_root = tempdir.path().join("state");
+    let trace = ThreadTraceContext::start_root_in_root_for_test(
+        &trace_root,
+        ThreadStartedTraceMetadata {
+            thread_id: "thread-root".to_string(),
+            agent_path: "/root".to_string(),
+            task_name: None,
+            nickname: None,
+            agent_role: None,
+            session_source: SessionSource::Exec,
+            cwd: PathBuf::from("/workspace"),
+            rollout_path: None,
+            model: "test-model".to_string(),
+            provider_name: "test-provider".to_string(),
+            approval_policy: "never".to_string(),
+            sandbox_policy: "read-only".to_string(),
+        },
+    )
+    .expect("start trace");
+    trace.record_codex_turn_started("turn-1");
+    std::fs::write(&store_root, "not a directory").expect("create conflicting store path");
+
+    let extension = AgentImprovementExtension;
+    let session_store = ExtensionData::new("session");
+    let thread_store = ExtensionData::new("thread-root");
+    thread_store.insert(capture_config(&store_root));
+    thread_store.insert(trace);
+
+    extension
+        .on_thread_stop(ThreadStopInput {
+            session_store: &session_store,
+            thread_store: &thread_store,
+        })
+        .await;
+
+    assert!(store_root.is_file());
+}
+
+#[tokio::test]
 async fn registry_install_registers_lifecycle_and_turn_input_hooks() {
     let mut builder = ExtensionRegistryBuilder::<codex_core::config::Config>::new();
     super::install(&mut builder);
     let registry = builder.build();
     assert_eq!(registry.thread_lifecycle_contributors().len(), 1);
     assert_eq!(registry.config_contributors().len(), 1);
+    assert_eq!(registry.turn_lifecycle_contributors().len(), 1);
     assert_eq!(registry.turn_input_contributors().len(), 1);
 }

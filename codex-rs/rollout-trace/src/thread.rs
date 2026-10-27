@@ -154,6 +154,39 @@ impl ThreadTraceContext {
         matches!(self.state, ThreadTraceContextState::Enabled(_))
     }
 
+    /// Returns the local bundle directory when this context records a trace.
+    pub fn bundle_dir(&self) -> Option<PathBuf> {
+        match &self.state {
+            ThreadTraceContextState::Disabled => None,
+            ThreadTraceContextState::Enabled(context) => Some(context.writer.bundle_dir()),
+        }
+    }
+
+    /// Returns whether this context belongs to the root thread of its rollout.
+    pub fn is_root_thread(&self) -> bool {
+        match &self.state {
+            ThreadTraceContextState::Disabled => false,
+            ThreadTraceContextState::Enabled(context) => {
+                context.thread_id == context.root_thread_id
+            }
+        }
+    }
+
+    /// Starts a root trace in a caller-selected local directory, failing closed
+    /// when trace initialization is unavailable.
+    pub fn start_root_in_root_or_disabled(
+        root: &Path,
+        metadata: ThreadStartedTraceMetadata,
+    ) -> Self {
+        match start_root_in_root(root, metadata) {
+            Ok(context) => context,
+            Err(err) => {
+                warn!("failed to initialize rollout trace bundle: {err:#}");
+                Self::disabled()
+            }
+        }
+    }
+
     /// Starts a fresh child thread in this context's rollout tree.
     ///
     /// Callers should use [`ThreadTraceContext::disabled`] for resumed children:

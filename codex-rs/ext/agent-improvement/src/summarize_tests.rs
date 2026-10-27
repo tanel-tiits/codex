@@ -274,6 +274,16 @@ fn completed_test_trace_is_summarized_without_raw_output() {
 }
 
 #[test]
+fn completed_turn_is_summarized_before_rollout_end_is_recorded() {
+    let mut trace = base_trace(RolloutStatus::Running);
+    add_user_input(&mut trace, "Implement the parser");
+    add_turn(&mut trace);
+
+    let card = summarize_rollout(&trace);
+    assert_eq!(card.failure_class, FailureClass::Completed);
+}
+
+#[test]
 fn summarized_topic_keys_retrieve_a_matching_future_task() {
     let mut trace = base_trace(RolloutStatus::Completed);
     add_user_input(&mut trace, "Implement the parser");

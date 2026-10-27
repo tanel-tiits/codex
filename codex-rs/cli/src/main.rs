@@ -3,11 +3,16 @@ use clap::CommandFactory;
 use clap::Parser;
 use clap_complete::Shell;
 use clap_complete::generate;
+use codex_agent_improvement_extension::CandidateStatus;
+use codex_agent_improvement_extension::ExperienceCandidate;
 use codex_agent_improvement_extension::append_card;
+use codex_agent_improvement_extension::find_candidate;
+use codex_agent_improvement_extension::load_candidates;
 use codex_agent_improvement_extension::load_cards;
 use codex_agent_improvement_extension::render_cards;
 use codex_agent_improvement_extension::select_relevant;
 use codex_agent_improvement_extension::summarize_rollout;
+use codex_agent_improvement_extension::update_candidate_status;
 use codex_app_server_daemon::BootstrapOptions as AppServerBootstrapOptions;
 use codex_app_server_daemon::LifecycleCommand as AppServerLifecycleCommand;
 use codex_app_server_daemon::RemoteControlMode as AppServerRemoteControlMode;
@@ -339,6 +344,9 @@ enum DebugAgentImprovementSubcommand {
 
     /// Render relevant local experience cards for a prospective task.
     Render(DebugAgentImprovementRenderCommand),
+
+    /// Review automatically captured candidates before they become active cards.
+    Candidates(DebugAgentImprovementCandidatesCommand),
 }
 
 #[derive(Debug, Parser)]
@@ -373,6 +381,49 @@ struct DebugAgentImprovementRenderCommand {
     /// Maximum rendered context budget in tokens.
     #[arg(long = "max-context-tokens", default_value_t = codex_config::types::DEFAULT_AGENT_IMPROVEMENT_MAX_CONTEXT_TOKENS)]
     max_context_tokens: usize,
+}
+
+#[derive(Debug, Parser)]
+struct DebugAgentImprovementCandidatesCommand {
+    #[command(subcommand)]
+    subcommand: DebugAgentImprovementCandidatesSubcommand,
+}
+
+#[derive(Debug, clap::Subcommand)]
+enum DebugAgentImprovementCandidatesSubcommand {
+    /// List pending candidates, or all candidate states with --all.
+    List(DebugAgentImprovementCandidatesListCommand),
+
+    /// Show one candidate by stable ID.
+    Show(DebugAgentImprovementCandidateIdCommand),
+
+    /// Accept a pending candidate and copy its card into the active store.
+    Accept(DebugAgentImprovementCandidateIdCommand),
+
+    /// Reject a pending candidate without adding it to the active store.
+    Reject(DebugAgentImprovementCandidateIdCommand),
+}
+
+#[derive(Debug, Parser)]
+struct DebugAgentImprovementCandidatesListCommand {
+    /// Candidate store directory containing candidates.jsonl.
+    #[arg(long = "store", value_name = "DIR", required = true)]
+    store: PathBuf,
+
+    /// Include accepted, rejected, and expired candidates.
+    #[arg(long = "all", default_value_t = false)]
+    all: bool,
+}
+
+#[derive(Debug, Parser)]
+struct DebugAgentImprovementCandidateIdCommand {
+    /// Candidate store directory containing candidates.jsonl.
+    #[arg(long = "store", value_name = "DIR", required = true)]
+    store: PathBuf,
+
+    /// Stable candidate ID returned by the list or show command.
+    #[arg(value_name = "CANDIDATE_ID")]
+    candidate_id: String,
 }
 
 #[derive(Debug, Parser)]
@@ -1922,6 +1973,9 @@ async fn cli_main(
                     DebugAgentImprovementSubcommand::Render(cmd) => {
                         run_debug_agent_improvement_render_command(cmd)?;
                     }
+                    DebugAgentImprovementSubcommand::Candidates(cmd) => {
+                        run_debug_agent_improvement_candidates_command(cmd)?;
+                    }
                 }
             }
             DebugSubcommand::TraceReduce(cmd) => {
@@ -2180,6 +2234,70 @@ fn run_debug_agent_improvement_render_command(
     let selected = select_relevant(&cards, &cmd.query, cmd.max_cards);
     println!("{}", render_cards(&selected, cmd.max_context_tokens));
     Ok(())
+}
+
+fn run_debug_agent_improvement_candidates_command(
+    cmd: DebugAgentImprovementCandidatesCommand,
+) -> anyhow::Result<()> {
+    match cmd.subcommand {
+        DebugAgentImprovementCandidatesSubcommand::List(cmd) => {
+            let mut candidates = load_candidates(&cmd.store)?;
+            if !cmd.all {
+                candidates.retain(|candidate| candidate.status == CandidateStatus::Pending);
+            }
+            candidates.sort_by(|left, right| {
+                right
+                    .created_at_unix_ms
+                    .cmp(&left.created_at_unix_ms)
+                    .then_with(|| left.candidate_id.cmp(&right.candidate_id))
+            });
+            println!("{}", serde_json::to_string_pretty(&candidates)?);
+        }
+        DebugAgentImprovementCandidatesSubcommand::Show(cmd) => {
+            let candidate = require_candidate(&cmd.store, &cmd.candidate_id)?;
+            println!("{}", serde_json::to_string_pretty(&candidate)?);
+        }
+        DebugAgentImprovementCandidatesSubcommand::Accept(cmd) => {
+            let candidate = require_pending_candidate(&cmd.store, &cmd.candidate_id)?;
+            // Persist the active card first. If the status append fails, a retry
+            // remains idempotent because append_card deduplicates by card ID.
+            append_card(&cmd.store, &candidate.card)?;
+            let accepted =
+                update_candidate_status(&cmd.store, &cmd.candidate_id, CandidateStatus::Accepted)?
+                    .ok_or_else(|| anyhow::anyhow!("candidate disappeared during acceptance"))?;
+            println!("{}", serde_json::to_string_pretty(&accepted)?);
+        }
+        DebugAgentImprovementCandidatesSubcommand::Reject(cmd) => {
+            let _candidate = require_pending_candidate(&cmd.store, &cmd.candidate_id)?;
+            let rejected =
+                update_candidate_status(&cmd.store, &cmd.candidate_id, CandidateStatus::Rejected)?
+                    .ok_or_else(|| anyhow::anyhow!("candidate disappeared during rejection"))?;
+            println!("{}", serde_json::to_string_pretty(&rejected)?);
+        }
+    }
+    Ok(())
+}
+
+fn require_candidate(
+    store: &std::path::Path,
+    candidate_id: &str,
+) -> anyhow::Result<ExperienceCandidate> {
+    find_candidate(store, candidate_id)?
+        .ok_or_else(|| anyhow::anyhow!("agent-improvement candidate not found: {candidate_id}"))
+}
+
+fn require_pending_candidate(
+    store: &std::path::Path,
+    candidate_id: &str,
+) -> anyhow::Result<ExperienceCandidate> {
+    let candidate = require_candidate(store, candidate_id)?;
+    if candidate.status != CandidateStatus::Pending {
+        anyhow::bail!(
+            "agent-improvement candidate {candidate_id} is already {}",
+            candidate.status.as_str()
+        );
+    }
+    Ok(candidate)
 }
 
 async fn run_debug_prompt_input_command(
@@ -3703,6 +3821,39 @@ enabled = true
         assert_eq!(cmd.query, "fix parser tests");
         assert_eq!(cmd.max_cards, 3);
         assert_eq!(cmd.max_context_tokens, 640);
+    }
+
+    #[test]
+    fn debug_agent_improvement_candidates_parses_review_commands() {
+        let cli = MultitoolCli::try_parse_from([
+            "codex",
+            "debug",
+            "agent-improvement",
+            "candidates",
+            "accept",
+            "--store",
+            "/tmp/agent-improvement",
+            "candidate_123",
+        ])
+        .expect("parse candidate acceptance");
+
+        let Some(Subcommand::Debug(DebugCommand {
+            subcommand:
+                DebugSubcommand::AgentImprovement(DebugAgentImprovementCommand {
+                    subcommand:
+                        DebugAgentImprovementSubcommand::Candidates(
+                            DebugAgentImprovementCandidatesCommand { subcommand },
+                        ),
+                }),
+        })) = cli.subcommand
+        else {
+            panic!("expected candidate command");
+        };
+        let DebugAgentImprovementCandidatesSubcommand::Accept(command) = subcommand else {
+            panic!("expected candidate acceptance");
+        };
+        assert_eq!(command.store, PathBuf::from("/tmp/agent-improvement"));
+        assert_eq!(command.candidate_id, "candidate_123");
     }
 
     #[test]

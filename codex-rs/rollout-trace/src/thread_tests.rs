@@ -42,6 +42,9 @@ fn create_in_root_writes_replayable_lifecycle_events() -> anyhow::Result<()> {
         },
     )?;
 
+    assert!(thread_trace.is_root_thread());
+    assert!(thread_trace.bundle_dir().is_some());
+
     thread_trace.record_ended(RolloutStatus::Completed);
 
     let bundle_dir = single_bundle_dir(temp.path())?;
@@ -113,6 +116,9 @@ fn spawned_thread_start_appends_to_root_bundle() -> anyhow::Result<()> {
 fn disabled_thread_context_accepts_trace_calls_without_writing() -> anyhow::Result<()> {
     let temp = TempDir::new()?;
     let thread_trace = ThreadTraceContext::disabled();
+
+    assert!(!thread_trace.is_root_thread());
+    assert_eq!(thread_trace.bundle_dir(), None);
 
     thread_trace.record_ended(RolloutStatus::Completed);
     thread_trace.record_protocol_event(&EventMsg::ShutdownComplete);

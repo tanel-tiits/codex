@@ -1318,9 +1318,19 @@ impl Session {
                 // parent had no trace bundle, do not create an orphan child bundle
                 // that looks like an independent rollout.
                 parent_rollout_thread_trace.start_child_thread_trace_or_disabled(trace_metadata)
+            } else if matches!(
+                config.agent_improvement.capture,
+                codex_config::types::AgentImprovementCaptureMode::Candidate
+            ) {
+                let trace_root = config.codex_home.join("agent-improvement").join("traces");
+                ThreadTraceContext::start_root_in_root_or_disabled(
+                    trace_root.as_path(),
+                    trace_metadata,
+                )
             } else {
                 ThreadTraceContext::start_root_or_disabled(trace_metadata)
             };
+            thread_extension_data.insert(rollout_thread_trace.clone());
 
             let mut post_session_configured_events = Vec::<Event>::new();
 

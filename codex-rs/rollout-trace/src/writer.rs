@@ -39,6 +39,7 @@ pub struct TraceWriter {
 
 #[derive(Debug)]
 struct TraceWriterInner {
+    bundle_dir: PathBuf,
     manifest: TraceBundleManifest,
     payloads_dir: PathBuf,
     event_log: BufWriter<File>,
@@ -73,6 +74,7 @@ impl TraceWriter {
 
         Ok(Self {
             inner: Mutex::new(TraceWriterInner {
+                bundle_dir,
                 manifest,
                 payloads_dir,
                 event_log: BufWriter::new(event_log),
@@ -80,6 +82,14 @@ impl TraceWriter {
                 next_payload_ordinal: 1,
             }),
         })
+    }
+
+    /// Returns the local directory containing this writer's trace bundle.
+    ///
+    /// The path is used by opt-in local post-processing. Callers must treat it
+    /// as a diagnostic location, not as a source of model-visible context.
+    pub fn bundle_dir(&self) -> PathBuf {
+        self.lock_inner().bundle_dir.clone()
     }
 
     /// Writes a JSON payload file and returns its reduced-state reference.

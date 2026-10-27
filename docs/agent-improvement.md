@@ -20,6 +20,8 @@ Add this to the effective Codex configuration:
 enabled = true
 max_cards = 8
 max_context_tokens = 1200
+capture = "off"
+max_candidates = 64
 ```
 
 The card store is:
@@ -32,6 +34,15 @@ Codex reads that file at turn preparation time and selects cards with
 deterministic lexical overlap and opaque topic-key overlap against the current
 user text. Missing stores, malformed lines, oversized cards, and read failures
 are ignored with a bounded warning.
+
+Retrieval and capture are independent. capture = "off" is the default.
+Setting capture = "candidate" enables local rollout tracing under
+$CODEX_HOME/agent-improvement/traces and creates reviewable candidates in:
+
+    $CODEX_HOME/agent-improvement/candidates.jsonl
+
+Candidates are never injected into prompts and are not active cards until
+explicitly accepted.
 
 ## Create a card from a trace
 
@@ -67,7 +78,44 @@ coarse task families and outcomes such as command failure, tool failure,
 policy blocking, cancellation, and incomplete verification. It does not make
 a model call.
 
-## Inspect and remove cards
+## Automatic candidate capture and review
+
+To enable automatic, review-gated capture:
+
+    [agent_improvement]
+    capture = "candidate"
+    max_candidates = 64
+
+This records local trace bundles and, when a turn completes, errors, is
+aborted, or the root thread stops, reduces bounded evidence into a pending
+candidate. Capture is performed in a blocking worker outside the model/tool
+execution path; failures to replay or write a candidate do not change the turn
+result. Raw trace bundles may contain sensitive diagnostic material and should
+be deleted when no longer needed.
+
+List pending candidates:
+
+    codex debug agent-improvement candidates list --store "$CODEX_HOME/agent-improvement"
+
+Inspect one candidate:
+
+    codex debug agent-improvement candidates show --store "$CODEX_HOME/agent-improvement" candidate_<ID>
+
+Accepting is the explicit promotion boundary. It copies the bounded card into
+cards.jsonl; it does not modify repository files, Skills, AGENTS.md, or
+permissions:
+
+    codex debug agent-improvement candidates accept --store "$CODEX_HOME/agent-improvement" candidate_<ID>
+
+Reject a candidate without activating it:
+
+    codex debug agent-improvement candidates reject --store "$CODEX_HOME/agent-improvement" candidate_<ID>
+
+The embedded agent-card-curator Skill provides a conversational review workflow
+around these commands. It must receive explicit user approval before accepting
+a candidate.
+
+## Inspect and remove cards and candidates
 
 Preview the cards that would be relevant to a task:
 
@@ -78,10 +126,17 @@ codex debug agent-improvement render \
 ```
 
 The store is append-only during normal card creation and deduplicates
-deterministic card IDs. To remove experience, stop Codex and delete
-$CODEX_HOME/agent-improvement/cards.jsonl; the data is local and can be
-recreated from reviewed traces. Delete the entire agent-improvement directory
-if its empty-directory metadata is also unwanted.
+deterministic card IDs. Candidate status transitions are also append-only;
+loading uses the latest valid record for each candidate ID. To remove
+experience, stop Codex and delete the relevant local files:
+
+    $CODEX_HOME/agent-improvement/cards.jsonl
+    $CODEX_HOME/agent-improvement/candidates.jsonl
+    $CODEX_HOME/agent-improvement/traces/
+
+Cards can be recreated from reviewed traces; candidates can be recreated by
+running future sessions with capture enabled. Delete the entire
+agent-improvement directory if its empty-directory metadata is also unwanted.
 
 ## Review before use
 
@@ -98,9 +153,9 @@ this store and subject them to normal tests and human review.
 Card retrieval is not an evaluation, a guarantee of correctness, or a
 replacement for running relevant verification. The strongest workflow is:
 
-1. observe a rollout;
-2. reduce and review the trace;
-3. create a bounded card only when the lesson is useful;
+1. enable candidate capture for a narrowly scoped local workflow;
+2. observe a rollout and review the pending candidate;
+3. accept only a lesson that is useful and bounded;
 4. inspect the rendered context;
-5. enable retrieval for a narrowly matched workflow;
+5. enable retrieval for the matching workflow;
 6. verify future changes independently.

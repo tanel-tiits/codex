@@ -170,7 +170,14 @@ fn classify_failure(
         return FailureClass::ModelFailure;
     }
 
-    if matches!(&trace.status, RolloutStatus::Completed)
+    let has_completed_turn = trace
+        .codex_turns
+        .values()
+        .any(|turn| matches!(turn.execution.status, ExecutionStatus::Completed));
+    let effectively_completed =
+        matches!(&trace.status, RolloutStatus::Completed) || has_completed_turn;
+
+    if effectively_completed
         && matches!(
             task_family,
             TaskFamily::Coding | TaskFamily::Testing | TaskFamily::Review
@@ -180,7 +187,7 @@ fn classify_failure(
     {
         return FailureClass::IncompleteVerification;
     }
-    if matches!(&trace.status, RolloutStatus::Completed) {
+    if effectively_completed {
         FailureClass::Completed
     } else {
         FailureClass::Unknown

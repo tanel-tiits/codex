@@ -1,6 +1,7 @@
 use std::path::PathBuf;
 use std::sync::Arc;
 
+use codex_config::types::AgentImprovementCaptureMode;
 use codex_context_fragments::AdditionalContextUserFragment;
 use codex_context_fragments::ContextualUserFragment;
 use codex_core::config::Config;
@@ -11,10 +12,19 @@ use codex_extension_api::ExtensionMetrics;
 use codex_extension_api::ExtensionRegistryBuilder;
 use codex_extension_api::ThreadLifecycleContributor;
 use codex_extension_api::ThreadStartInput;
+use codex_extension_api::ThreadStopInput;
+use codex_extension_api::TurnAbortInput;
+use codex_extension_api::TurnErrorInput;
 use codex_extension_api::TurnInputContext;
 use codex_extension_api::TurnInputContributor;
+use codex_extension_api::TurnLifecycleContributor;
+use codex_extension_api::TurnStopInput;
 use codex_protocol::user_input::UserInput;
+use codex_rollout_trace::ThreadTraceContext;
 
+use crate::CandidateTrigger;
+use crate::capture::CandidateCaptureOutcome;
+use crate::capture::capture_candidate_from_bundle;
 use crate::load_cards;
 use crate::render_cards;
 use crate::select_relevant;
@@ -32,6 +42,8 @@ pub struct AgentImprovementExtensionConfig {
     pub root: PathBuf,
     pub max_cards: usize,
     pub max_context_tokens: usize,
+    pub capture: AgentImprovementCaptureMode,
+    pub max_candidates: usize,
 }
 
 impl AgentImprovementExtensionConfig {
@@ -41,7 +53,13 @@ impl AgentImprovementExtensionConfig {
             root: config.codex_home.join("agent-improvement").to_path_buf(),
             max_cards: config.agent_improvement.max_cards,
             max_context_tokens: config.agent_improvement.max_context_tokens,
+            capture: config.agent_improvement.capture,
+            max_candidates: config.agent_improvement.max_candidates,
         }
+    }
+
+    fn capture_enabled(&self) -> bool {
+        self.capture == AgentImprovementCaptureMode::Candidate
     }
 }
 
@@ -97,6 +115,33 @@ impl ThreadLifecycleContributor<Config> for AgentImprovementExtension {
                 .insert(AgentImprovementExtensionConfig::from_config(input.config));
         })
     }
+
+    fn on_thread_stop<'a>(&'a self, input: ThreadStopInput<'a>) -> ExtensionFuture<'a, ()> {
+        Box::pin(async move {
+            let Some(config) = input.thread_store.get::<AgentImprovementExtensionConfig>() else {
+                return;
+            };
+            if !config.capture_enabled() {
+                return;
+            }
+            let Some(trace) = input.thread_store.get::<ThreadTraceContext>() else {
+                tracing::debug!(
+                    "agent-improvement candidate capture is enabled but no rollout trace is attached"
+                );
+                return;
+            };
+            if !trace.is_root_thread() {
+                return;
+            }
+            capture_candidate(
+                config.as_ref().clone(),
+                trace.as_ref().clone(),
+                CandidateTrigger::ThreadStop,
+                None,
+            )
+            .await;
+        })
+    }
 }
 
 impl ConfigContributor<Config> for AgentImprovementExtension {
@@ -138,11 +183,107 @@ impl TurnInputContributor for AgentImprovementExtension {
     }
 }
 
+impl TurnLifecycleContributor for AgentImprovementExtension {
+    fn on_turn_stop<'a>(&'a self, input: TurnStopInput<'a>) -> ExtensionFuture<'a, ()> {
+        Box::pin(async move {
+            let Some(config) = input.thread_store.get::<AgentImprovementExtensionConfig>() else {
+                return;
+            };
+            let Some(trace) = input.thread_store.get::<ThreadTraceContext>() else {
+                return;
+            };
+            capture_candidate(
+                config.as_ref().clone(),
+                trace.as_ref().clone(),
+                CandidateTrigger::TurnStop,
+                Some(input.turn_store.level_id().to_string()),
+            )
+            .await;
+        })
+    }
+
+    fn on_turn_abort<'a>(&'a self, input: TurnAbortInput<'a>) -> ExtensionFuture<'a, ()> {
+        Box::pin(async move {
+            let Some(config) = input.thread_store.get::<AgentImprovementExtensionConfig>() else {
+                return;
+            };
+            let Some(trace) = input.thread_store.get::<ThreadTraceContext>() else {
+                return;
+            };
+            capture_candidate(
+                config.as_ref().clone(),
+                trace.as_ref().clone(),
+                CandidateTrigger::TurnAbort,
+                Some(input.turn_store.level_id().to_string()),
+            )
+            .await;
+        })
+    }
+
+    fn on_turn_error<'a>(&'a self, input: TurnErrorInput<'a>) -> ExtensionFuture<'a, ()> {
+        Box::pin(async move {
+            let Some(config) = input.thread_store.get::<AgentImprovementExtensionConfig>() else {
+                return;
+            };
+            let Some(trace) = input.thread_store.get::<ThreadTraceContext>() else {
+                return;
+            };
+            capture_candidate(
+                config.as_ref().clone(),
+                trace.as_ref().clone(),
+                CandidateTrigger::TurnError,
+                Some(input.turn_id.to_string()),
+            )
+            .await;
+        })
+    }
+}
+
+async fn capture_candidate(
+    config: AgentImprovementExtensionConfig,
+    trace: ThreadTraceContext,
+    trigger: CandidateTrigger,
+    source_turn_id: Option<String>,
+) {
+    if !config.capture_enabled() {
+        return;
+    }
+    let Some(bundle_dir) = trace.bundle_dir() else {
+        return;
+    };
+    let store_root = config.root.clone();
+    let max_candidates = config.max_candidates;
+    let result = tokio::task::spawn_blocking(move || {
+        capture_candidate_from_bundle(
+            &bundle_dir,
+            &store_root,
+            trigger,
+            source_turn_id,
+            max_candidates,
+        )
+    })
+    .await;
+    match result {
+        Ok(Ok(CandidateCaptureOutcome::Added(candidate))) => {
+            tracing::debug!(candidate_id = %candidate.candidate_id, "captured agent-improvement candidate");
+        }
+        Ok(Ok(CandidateCaptureOutcome::AlreadyPresent))
+        | Ok(Ok(CandidateCaptureOutcome::SkippedNoEvidence)) => {}
+        Ok(Err(error)) => {
+            tracing::warn!(error = %error, "agent-improvement candidate capture failed");
+        }
+        Err(error) => {
+            tracing::warn!(error = %error, "agent-improvement candidate capture task failed");
+        }
+    }
+}
+
 /// Installs advisory experience retrieval into a Codex extension registry.
 pub fn install(registry: &mut ExtensionRegistryBuilder<Config>) {
     let extension = Arc::new(AgentImprovementExtension);
     registry.thread_lifecycle_contributor(extension.clone());
     registry.config_contributor(extension.clone());
+    registry.turn_lifecycle_contributor(extension.clone());
     registry.turn_input_contributor(extension);
 }
 

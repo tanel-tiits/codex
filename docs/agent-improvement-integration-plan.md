@@ -1,6 +1,6 @@
 # Agent Improvement Integration Plan
 
-Status: Milestone 1 complete; Milestones 2–8 planned
+Status: Milestones 1–2 complete; Milestones 3–8 planned
 
 ## Objective
 
@@ -84,15 +84,15 @@ privacy, provenance, rollback, and human-review boundaries.
 
 ## Roadmap and milestones
 
-Milestone 1 is complete in this working tree. The remaining milestones are
-ordered by the dependency that makes each new form of autonomy safe and
+Milestones 1 and 2 are complete in this working tree. The remaining milestones
+are ordered by the dependency that makes each new form of autonomy safe and
 measurable. A milestone is not considered complete merely because its code
 exists; its exit gate and regression evidence must also be satisfied.
 
 | Milestone | Outcome | Priority | Depends on | Status |
 | --- | --- | --- | --- | --- |
 | 1. Safe local experience foundation | Deterministic, privacy-bounded cards can be created explicitly and retrieved as advisory context | Essential | Existing trace and extension systems | Complete |
-| 2. Automatic candidate capture and review | Long sessions produce reviewable candidates without requiring a manual CLI step; nothing is promoted automatically | Immediately next | 1 | Planned |
+| 2. Automatic candidate capture and review | Long sessions produce reviewable candidates without requiring a manual CLI step; nothing is promoted automatically | Immediately next | 1 | Complete |
 | 3. Evidence-rich lessons and retrieval | Cards describe recurring failure signatures, interventions, outcomes, scope, and confidence rather than only coarse summaries | High value | 2 | Planned |
 | 4. Replay and evaluation harness | Baseline versus memory-assisted work can be measured on paired and held-out tasks | Essential before autonomy | 2–3 | Planned |
 | 5. Offline proposer and candidate artifacts | A focused skill or offline model call can propose cards, skills, or guidance diffs for review | High value | 3–4 | Planned |
@@ -119,6 +119,13 @@ yet an automatic learning loop or a causal record that a recommendation helped.
 
 ### Milestone 2 — Automatic candidate capture and human review
 
+**Implementation status: complete.**
+
+The first review-gated capture loop is implemented and covered by focused unit
+and integration tests. Capture remains independently switchable from retrieval
+and is disabled by default. A candidate is never prompt-visible until the
+user explicitly accepts it.
+
 **Intent:** remove the operational burden of remembering to run the summarizer
 after a long session while keeping the candidate-to-active boundary explicit.
 
@@ -140,10 +147,13 @@ after a long session while keeping the candidate-to-active boundary explicit.
   rollout-trace finalization path to enqueue bounded post-turn or post-thread
   summarization work. Summarization must not block model/tool execution or
   make a failed turn fail harder.
-- Produce at most one deduplicated candidate per meaningful failure episode or
-  completed milestone, rather than one candidate for every event. A long
-  session should be segmented at turn failures, verification checkpoints, and
-  configured turn-count boundaries.
+- Produce bounded, deterministic candidates at turn and root-thread lifecycle
+  boundaries. Candidate records retain the source trace, source turn, trigger,
+  and derived card identity; queue deduplication collapses repeated lifecycle
+  notifications for one source turn. Richer failure-episode segmentation and
+  verification checkpoint grouping are intentionally deferred to Milestone 3,
+  where the evidence-rich schema can represent them without copying raw trace
+  content.
 - Add candidate lifecycle metadata: candidate ID, source trace ID, source turn
   or episode ID, creation time, status (`pending`, `accepted`, `rejected`, or
   `expired`), and a deterministic content fingerprint. Keep raw trace data in
@@ -169,27 +179,35 @@ after a long session while keeping the candidate-to-active boundary explicit.
 
 **Configuration shape:** extend `[agent_improvement]` with an explicitly
 documented capture mode and independent queue limits. Keep retrieval and
-capture independently switchable. For example, `capture = "off"` or
-`capture = "candidate"`, `max_candidates`, `candidate_max_bytes`, and a
-bounded retention period. Do not expose automatic promotion yet.
+capture independently switchable. The implemented controls are
+`capture = "off"` or `capture = "candidate"` and `max_candidates`; the store
+also enforces fixed byte, line, and record bounds. Candidate retention and
+episode-specific limits remain follow-up work after Milestone 3 supplies the
+metadata needed to expire or merge candidates safely. Automatic promotion is
+not exposed.
 
 **Tests and verification:**
 
-- fake lifecycle sequences for normal completion, failed command, tool error,
-  cancellation, and thread shutdown;
-- prove capture is asynchronous/bounded and that store or replay errors do not
-  affect the turn result;
-- prove restart/replay idempotence and concurrent-writer safety;
-- prove candidate deduplication, queue limits, expiry, malformed-line
-  tolerance, and no candidate-to-prompt leakage;
-- integration-test the curator Skill against a temporary store with explicit
+- fake lifecycle sequences for normal completion and root-thread shutdown;
+- prove capture runs in a blocking worker and that store or replay errors do
+  not affect the turn result;
+- prove replay idempotence, candidate deduplication, queue limits,
+  append-only status transitions, malformed-line tolerance, and no
+  candidate-to-prompt leakage;
+- integration-test the review CLI against a temporary store with explicit
   accept/reject decisions;
-- measure capture overhead and set a regression budget before enabling it by
-  default for development users.
+- defer richer episode grouping, expiration, concurrent-writer stress testing,
+  and capture-overhead benchmarking to the follow-up hardening work attached
+  to Milestones 3–4.
 
 **Exit gate:** a user can finish a long session, find a bounded candidate
 without remembering a follow-up command, and review it later. The live agent's
 behavior is unchanged until the user explicitly accepts the candidate.
+
+The exit gate is satisfied by the automatic root-trace path, lifecycle capture
+callbacks, bounded candidate JSONL store, review CLI, and embedded
+`agent-card-curator` Skill. Acceptance writes the validated card through the
+existing active-card store and then appends the terminal candidate status.
 
 ### Milestone 3 — Evidence-rich lessons and retrieval
 
@@ -515,7 +533,7 @@ automatic candidate -> curator review -> active card -> paired evaluation
 
 ## Architecture
 
-Add one extension crate, `codex-agent-improvement-extension`, with four small
+Add one extension crate, `codex-agent-improvement-extension`, with five small
 responsibilities:
 
 1. **Schema**: serializable `ExperienceCard`, evidence counters, task-family
@@ -525,7 +543,9 @@ responsibilities:
 3. **Store**: append-only JSONL persistence under
    `$CODEX_HOME/agent-improvement/cards.jsonl`, with bounded lexical retrieval
    and deterministic ordering.
-4. **Prompt integration**: an opt-in extension that selects relevant cards from
+4. **Candidate review**: bounded candidate JSONL persistence, lifecycle capture,
+   deterministic deduplication, and explicit terminal review transitions.
+5. **Prompt integration**: an opt-in extension that selects relevant cards from
    the current user input and injects them as clearly marked advisory user
    context. Cards are not developer policy and cannot override user, system,
    safety, or repository instructions.
@@ -590,11 +610,16 @@ Add an `[agent_improvement]` configuration block with:
 enabled = false
 max_cards = 8
 max_context_tokens = 1200
+capture = "off"
+max_candidates = 64
 ```
 
 The effective default is disabled. When enabled:
 
 - only `$CODEX_HOME/agent-improvement/cards.jsonl` is read;
+- candidate capture, when explicitly set to `candidate`, writes only to the
+  local trace and review-queue paths under `$CODEX_HOME/agent-improvement`;
+- pending candidates are never read by prompt retrieval;
 - missing or malformed cards are skipped with a bounded warning;
 - oversized stores, lines, and card fields are rejected or skipped within
   fixed local resource limits;
@@ -838,13 +863,20 @@ The focused validation completed with these results:
 
 - `cargo test -p codex-config agent_improvement`: 2 passed;
 - `cargo test -p codex-core --lib load_config_resolves_agent_improvement_settings`: 1 passed;
-- `cargo test -p codex-agent-improvement-extension`: 22 passed;
-- `cargo test -p codex-cli --test agent_improvement`: 2 passed;
-- `cargo test -p codex-cli debug_agent_improvement`: 2 parser tests passed;
+- `cargo test -p codex-agent-improvement-extension`: 33 passed;
+- `cargo test -p codex-cli --test agent_improvement`: 4 passed;
+- `cargo test -p codex-cli debug_agent_improvement`: 3 parser tests passed;
 - `cargo test -p codex-app-server extensions`: 6 unit tests and 2 filtered
   integration tests passed;
+- `cargo test -p codex-rollout-trace thread`: root/child trace context tests passed;
+- `cargo test -p codex-skills`: embedded skill fingerprint tests passed;
 - `cargo check -p codex-thread-manager-sample`: passed;
 - `cargo fmt --all -- --check` and `git diff --check`: passed.
+
+Milestone 2 additionally verifies that capture can be enabled while retrieval
+is disabled, that a turn-stop candidate is available before the thread closes,
+that pending candidates do not create `cards.jsonl`, and that explicit CLI
+acceptance is the only path from pending state to prompt-visible active card.
 
 An earlier broader `cargo test -p codex-core config` run compiled the target
 and then aborted in the unrelated existing
@@ -877,9 +909,14 @@ cross-task evidence.
 | --- | --- | --- |
 | 0. Plan | complete | This file; `git diff --check` |
 | 1. Configuration | complete | Config and effective-value tests; focused core resolution test |
-| 2. Schema/store | complete | 22 extension tests cover schema, persistence, topic ranking, resource bounds, and malformed data |
+| 2. Schema/store | complete | Foundation schema/store tests; the full extension suite now also covers candidate persistence |
 | 3. Trace summarizer | complete | Deterministic reduced-trace tests cover completed, command/tool/model/policy/cancelled/incomplete outcomes |
 | 4. Debug CLI | complete | Parser tests plus end-to-end summarize/render and explicit-persistence test |
 | 5. Prompt integration | complete | App-server registry test, extension tests, and end-to-end debug prompt-input injection test |
 | 6. Documentation | complete | docs/agent-improvement.md; formatting and diff checks |
 | 7. Full validation | complete | Focused config/core/extension/CLI/app-server tests, formatting, and diff checks; one unrelated pre-existing core stack-overflow test remains documented in the handoff |
+| 2.1 Capture configuration and trace bridge | complete | Capture mode/max-candidate config tests; automatic root trace creation; trace context lifecycle tests |
+| 2.2 Candidate schema, bounded store, and capture | complete | Candidate serialization, deterministic identity, append-only status, queue-limit, malformed-line, and no-active-card tests |
+| 2.3 Lifecycle wiring | complete | Turn-stop and root-thread-stop capture tests; replay failures are isolated from lifecycle callbacks |
+| 2.4 Review CLI and curator Skill | complete | Candidate list/show/accept/reject parser and end-to-end acceptance tests; embedded `agent-card-curator` asset |
+| 2.5 Documentation and validation | complete | Updated user guide and roadmap; focused Milestone 2 test suite and formatting checks |

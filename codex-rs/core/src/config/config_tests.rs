@@ -41,6 +41,7 @@ use codex_config::permissions_toml::NetworkToml;
 use codex_config::permissions_toml::PermissionProfileToml;
 use codex_config::permissions_toml::PermissionsToml;
 use codex_config::permissions_toml::WorkspaceRootsToml;
+use codex_config::types::AgentImprovementCaptureMode;
 use codex_config::types::AgentImprovementConfig;
 use codex_config::types::AgentImprovementToml;
 use codex_config::types::AppToolApproval;
@@ -272,6 +273,8 @@ max_context_tokens = 9000
             enabled: Some(true),
             max_cards: Some(64),
             max_context_tokens: Some(9000),
+            capture: None,
+            max_candidates: None,
         })
     );
 
@@ -288,6 +291,8 @@ max_context_tokens = 9000
             enabled: true,
             max_cards: 64,
             max_context_tokens: 8_000,
+            capture: AgentImprovementCaptureMode::Off,
+            max_candidates: 64,
         }
     );
     Ok(())
