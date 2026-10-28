@@ -8,9 +8,11 @@ use codex_agent_improvement_extension::CandidateStatus;
 use codex_agent_improvement_extension::ExperienceCandidate;
 use codex_agent_improvement_extension::FeedbackState;
 use codex_agent_improvement_extension::append_card;
+use codex_agent_improvement_extension::evaluate_manifest;
 use codex_agent_improvement_extension::find_candidate;
 use codex_agent_improvement_extension::load_candidates;
 use codex_agent_improvement_extension::load_cards;
+use codex_agent_improvement_extension::load_evaluation_manifest;
 use codex_agent_improvement_extension::record_card_feedback;
 use codex_agent_improvement_extension::record_card_outcome;
 use codex_agent_improvement_extension::render_cards;
@@ -18,6 +20,7 @@ use codex_agent_improvement_extension::retire_card;
 use codex_agent_improvement_extension::select_relevant;
 use codex_agent_improvement_extension::summarize_rollout;
 use codex_agent_improvement_extension::update_candidate_status;
+use codex_agent_improvement_extension::write_evaluation_result;
 use codex_app_server_daemon::BootstrapOptions as AppServerBootstrapOptions;
 use codex_app_server_daemon::LifecycleCommand as AppServerLifecycleCommand;
 use codex_app_server_daemon::RemoteControlMode as AppServerRemoteControlMode;
@@ -344,6 +347,9 @@ struct DebugAgentImprovementCommand {
 
 #[derive(Debug, clap::Subcommand)]
 enum DebugAgentImprovementSubcommand {
+    /// Evaluate paired baseline and memory-assisted rollout bundles.
+    Eval(DebugAgentImprovementEvalCommand),
+
     /// Summarize a local rollout bundle into one bounded experience card.
     Summarize(DebugAgentImprovementSummarizeCommand),
 
@@ -355,6 +361,17 @@ enum DebugAgentImprovementSubcommand {
 
     /// Manage active lesson lifecycle and adoption metadata.
     Cards(DebugAgentImprovementCardsCommand),
+}
+
+#[derive(Debug, Parser)]
+struct DebugAgentImprovementEvalCommand {
+    /// Local JSON scenario manifest containing private paired-run inputs.
+    #[arg(value_name = "SCENARIO_SET")]
+    scenario_set: PathBuf,
+
+    /// Write the redacted aggregate result to this file.
+    #[arg(long = "output", short = 'o', value_name = "RESULTS", required = true)]
+    output: PathBuf,
 }
 
 #[derive(Debug, Parser)]
@@ -2038,6 +2055,9 @@ async fn cli_main(
                     "debug agent-improvement",
                 )?;
                 match subcommand {
+                    DebugAgentImprovementSubcommand::Eval(cmd) => {
+                        run_debug_agent_improvement_eval_command(cmd)?;
+                    }
                     DebugAgentImprovementSubcommand::Summarize(cmd) => {
                         run_debug_agent_improvement_summarize_command(cmd).await?;
                     }
@@ -2282,6 +2302,33 @@ async fn run_debug_trace_reduce_command(cmd: DebugTraceReduceCommand) -> anyhow:
     println!("{}", output.display());
 
     Ok(())
+}
+
+fn run_debug_agent_improvement_eval_command(
+    cmd: DebugAgentImprovementEvalCommand,
+) -> anyhow::Result<()> {
+    let manifest = load_evaluation_manifest(&cmd.scenario_set)?;
+    anyhow::ensure!(
+        path_identity_for_cli(&cmd.scenario_set) != path_identity_for_cli(&cmd.output),
+        "evaluation output must not overwrite the scenario manifest"
+    );
+    let result = evaluate_manifest(&manifest)?;
+    write_evaluation_result(&manifest, &result, &cmd.output)?;
+    println!("{}", serde_json::to_string_pretty(&result)?);
+    Ok(())
+}
+
+fn path_identity_for_cli(path: &PathBuf) -> PathBuf {
+    if let Ok(canonical) = std::fs::canonicalize(path) {
+        return canonical;
+    }
+    if path.is_absolute() {
+        path.clone()
+    } else {
+        std::env::current_dir()
+            .unwrap_or_else(|_| PathBuf::from("."))
+            .join(path)
+    }
 }
 
 async fn run_debug_agent_improvement_summarize_command(
@@ -3921,6 +3968,33 @@ enabled = true
         assert_eq!(cmd.trace_bundle, PathBuf::from("/tmp/trace-bundle"));
         assert_eq!(cmd.store, Some(PathBuf::from("/tmp/cards")));
         assert_eq!(cmd.output, Some(PathBuf::from("/tmp/card.json")));
+    }
+
+    #[test]
+    fn debug_agent_improvement_eval_parses_manifest_and_output() {
+        let cli = MultitoolCli::try_parse_from([
+            "codex",
+            "debug",
+            "agent-improvement",
+            "eval",
+            "/tmp/scenarios.json",
+            "--output",
+            "/tmp/results.json",
+        ])
+        .expect("parse evaluation command");
+
+        let Some(Subcommand::Debug(DebugCommand {
+            subcommand:
+                DebugSubcommand::AgentImprovement(DebugAgentImprovementCommand {
+                    subcommand: DebugAgentImprovementSubcommand::Eval(command),
+                }),
+        })) = cli.subcommand
+        else {
+            panic!("expected evaluation command");
+        };
+
+        assert_eq!(command.scenario_set, PathBuf::from("/tmp/scenarios.json"));
+        assert_eq!(command.output, PathBuf::from("/tmp/results.json"));
     }
 
     #[test]

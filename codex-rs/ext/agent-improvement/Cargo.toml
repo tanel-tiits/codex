@@ -13,6 +13,7 @@ doctest = false
 workspace = true
 
 [dependencies]
+anyhow = { workspace = true }
 codex-config = { workspace = true }
 codex-context-fragments = { workspace = true }
 codex-core = { workspace = true }

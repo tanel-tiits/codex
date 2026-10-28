@@ -2,7 +2,18 @@ use std::path::Path;
 
 use anyhow::Result;
 use codex_agent_improvement_extension::AgentImprovementEvidence;
+use codex_agent_improvement_extension::AttributionEvidence;
 use codex_agent_improvement_extension::CandidateTrigger;
+use codex_agent_improvement_extension::EVALUATION_MANIFEST_SCHEMA_VERSION;
+use codex_agent_improvement_extension::EvaluationCondition;
+use codex_agent_improvement_extension::EvaluationManifest;
+use codex_agent_improvement_extension::EvaluationMemory;
+use codex_agent_improvement_extension::EvaluationRepository;
+use codex_agent_improvement_extension::EvaluationScenario;
+use codex_agent_improvement_extension::EvaluationSplit;
+use codex_agent_improvement_extension::EvaluationTask;
+use codex_agent_improvement_extension::EvaluatorKind;
+use codex_agent_improvement_extension::EvaluatorSpec;
 use codex_agent_improvement_extension::ExperienceCandidate;
 use codex_agent_improvement_extension::ExperienceCard;
 use codex_agent_improvement_extension::FailureClass;
@@ -129,6 +140,118 @@ fn summarize_command_is_json_and_persistence_is_explicit() -> Result<()> {
     assert!(rendered.contains("task=general"));
     assert!(rendered.contains("outcome=completed"));
 
+    Ok(())
+}
+
+#[test]
+fn eval_command_writes_redacted_paired_results() -> Result<()> {
+    let home = TempDir::new()?;
+    let baseline_root = TempDir::new()?;
+    let treatment_root = TempDir::new()?;
+    let baseline_bundle = minimal_completed_bundle(baseline_root.path())?;
+    let treatment_bundle = minimal_completed_bundle(treatment_root.path())?;
+    let scenario_root = TempDir::new()?;
+    let primary = scenario_root.path().join("primary");
+    let baseline_worktree = scenario_root.path().join("baseline-worktree");
+    let treatment_worktree = scenario_root.path().join("treatment-worktree");
+    let card_store = scenario_root.path().join("active-card-store");
+    for path in [
+        &primary,
+        &baseline_worktree,
+        &treatment_worktree,
+        &card_store,
+    ] {
+        std::fs::create_dir_all(path)?;
+    }
+
+    let condition = |trace_bundle: std::path::PathBuf,
+                     worktree: std::path::PathBuf,
+                     enabled: bool,
+                     card_set_fingerprint: &str,
+                     card_store_path: Option<std::path::PathBuf>|
+     -> EvaluationCondition {
+        EvaluationCondition {
+            trace_bundle,
+            worktree,
+            worktree_fingerprint: "worktree-fingerprint".to_string(),
+            execution_config_fingerprint: "config-fingerprint".to_string(),
+            policy_fingerprint: "policy-fingerprint".to_string(),
+            memory: EvaluationMemory {
+                enabled,
+                card_set_fingerprint: card_set_fingerprint.to_string(),
+                retrieval_policy_fingerprint: "retrieval-v1".to_string(),
+                card_schema_version: 2,
+                card_store_path,
+            },
+            judge: None,
+        }
+    };
+    let manifest = EvaluationManifest {
+        schema_version: EVALUATION_MANIFEST_SCHEMA_VERSION,
+        manifest_id: "cli-eval-manifest".to_string(),
+        scenarios: vec![EvaluationScenario {
+            scenario_id: "cli-scenario-1".to_string(),
+            task_family: TaskFamily::Testing,
+            split: EvaluationSplit::HeldOut,
+            task: EvaluationTask {
+                task_id: "cli-task".to_string(),
+                prompt: None,
+                reference: Some("fixture/cli-task".to_string()),
+                fingerprint: "task-fingerprint".to_string(),
+            },
+            repository: EvaluationRepository {
+                snapshot_fingerprint: "repo-fingerprint".to_string(),
+                primary_checkout: Some(primary),
+            },
+            baseline: condition(
+                baseline_bundle,
+                baseline_worktree,
+                false,
+                "cards-none",
+                None,
+            ),
+            treatment: condition(
+                treatment_bundle,
+                treatment_worktree,
+                true,
+                "cards-treatment-v1",
+                Some(card_store),
+            ),
+            evaluator: EvaluatorSpec {
+                kind: EvaluatorKind::TraceOutcome,
+                checks: Vec::new(),
+                require_all_checks: true,
+            },
+            budget: Default::default(),
+            attribution: AttributionEvidence::default(),
+        }],
+    };
+    let manifest_path = scenario_root.path().join("scenario-set.json");
+    let result_path = scenario_root.path().join("results.json");
+    std::fs::write(&manifest_path, serde_json::to_vec_pretty(&manifest)?)?;
+
+    let mut command = codex_command(home.path())?;
+    let output = command
+        .args([
+            "debug",
+            "agent-improvement",
+            "eval",
+            manifest_path.to_str().expect("UTF-8 manifest path"),
+            "--output",
+            result_path.to_str().expect("UTF-8 result path"),
+        ])
+        .output()?;
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let stdout: Value = serde_json::from_slice(&output.stdout)?;
+    let file: Value = serde_json::from_slice(&std::fs::read(&result_path)?)?;
+    assert_eq!(stdout, file);
+    assert_eq!(file["schema_version"], 1);
+    assert_eq!(file["held_out"]["scenario_count"], 1);
+    assert!(!serde_json::to_string(&file)?.contains("fixture/cli-task"));
     Ok(())
 }
 

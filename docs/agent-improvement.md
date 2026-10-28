@@ -161,6 +161,111 @@ codex debug agent-improvement cards retire \
   card_<ID>
 ```
 
+## Run a paired evaluation
+
+Milestone 4 adds an offline, deterministic evaluator. It consumes two rollout
+bundles that were already recorded for the same task: a baseline with memory
+disabled and a treatment with the declared card set enabled. The evaluator
+never launches a model, writes either worktree, or reads the active card
+store. This keeps CI and local measurement independent from credentials,
+approval settings, and live sandbox state.
+
+Record the two runs in separate worktrees with tracing enabled, then create a
+private scenario manifest. The manifest keeps prompts or task references,
+worktree paths, command-token checks, and judge labels local. A minimal
+scenario has this shape:
+
+~~~json
+{
+  "schema_version": 1,
+  "manifest_id": "parser-held-out-v1",
+  "scenarios": [
+    {
+      "scenario_id": "parser-001",
+      "task_family": "coding",
+      "split": "held_out",
+      "task": {
+        "task_id": "parser-fix",
+        "reference": "private/tasks/parser-fix",
+        "fingerprint": "sha256-of-task"
+      },
+      "repository": {
+        "snapshot_fingerprint": "sha256-of-repository-snapshot",
+        "primary_checkout": "/private/path/to/primary-checkout"
+      },
+      "baseline": {
+        "trace_bundle": "/private/path/to/baseline-trace",
+        "worktree": "/private/path/to/baseline-worktree",
+        "worktree_fingerprint": "sha256-before-run",
+        "execution_config_fingerprint": "config-v1",
+        "policy_fingerprint": "policy-v1",
+        "memory": {
+          "enabled": false,
+          "card_set_fingerprint": "none",
+          "retrieval_policy_fingerprint": "retrieval-v1",
+          "card_schema_version": 2
+        }
+      },
+      "treatment": {
+        "trace_bundle": "/private/path/to/treatment-trace",
+        "worktree": "/private/path/to/treatment-worktree",
+        "worktree_fingerprint": "sha256-before-run",
+        "execution_config_fingerprint": "config-v1",
+        "policy_fingerprint": "policy-v1",
+        "memory": {
+          "enabled": true,
+          "card_set_fingerprint": "sha256-of-card-set",
+          "retrieval_policy_fingerprint": "retrieval-v1",
+          "card_schema_version": 2,
+          "card_store_path": "/private/path/to/active-card-store"
+        }
+      },
+      "evaluator": {
+        "kind": "verification",
+        "checks": [
+          {
+            "check_id": "tests",
+            "command_tokens": ["cargo", "test"],
+            "expected_exit_code": 0
+          }
+        ],
+        "require_all_checks": true
+      },
+      "budget": {
+        "max_trace_bytes": 67108864,
+        "max_tokens": 2000000,
+        "max_wall_time_ms": 1800000,
+        "max_tool_calls": 512,
+        "max_terminal_operations": 512
+      }
+    }
+  ]
+}
+~~~
+
+The manifest must contain at least one held_out scenario. Baseline and
+treatment fingerprints must match for repository snapshot, initial worktree,
+execution configuration, policy, retrieval policy, and card schema; only the
+declared memory condition may differ. Worktrees must be disjoint from each
+other and from the primary checkout.
+
+Run the evaluator:
+
+~~~bash
+codex debug agent-improvement eval \
+  /private/path/to/scenario-set.json \
+  --output /private/path/to/evaluation-results.json
+~~~
+
+Results contain scenario IDs, opaque provenance fingerprints, verification
+outcomes, failure classes, retries, tool and terminal counts, tokens, wall
+time, cancellation, policy events, held-out aggregates, and per-task-family
+aggregates. They do not contain prompts, command tokens, local paths, or judge
+evidence references. Missing traces, evaluator failures, and cost-limit
+interruptions remain explicit partial results rather than being converted to
+zeroes. Treat exposed_and_outcome_improved as descriptive evidence only; it is
+not a causal claim.
+
 ## Inspect and remove cards and candidates
 
 Preview the cards that would be relevant to a task:

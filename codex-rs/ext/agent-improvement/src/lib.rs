@@ -7,6 +7,7 @@
 mod candidate;
 mod candidates;
 mod capture;
+mod eval;
 mod extension;
 mod schema;
 mod store;
@@ -18,6 +19,16 @@ pub use candidate::{
 pub use candidates::{
     CANDIDATE_STORE_FILE_NAME, append_candidate, candidates_path, find_candidate, load_candidates,
     update_candidate_status,
+};
+pub use eval::{
+    AttributionAssessment, AttributionEvidence, CheckResult, EVALUATION_MANIFEST_SCHEMA_VERSION,
+    EVALUATION_RESULT_SCHEMA_VERSION, EvaluationAggregate, EvaluationBudget, EvaluationCondition,
+    EvaluationConditionProvenance, EvaluationConditionResult, EvaluationErrorCode,
+    EvaluationManifest, EvaluationMemory, EvaluationMemoryProvenance, EvaluationMetrics,
+    EvaluationRepository, EvaluationResult, EvaluationScenario, EvaluationScenarioResult,
+    EvaluationSplit, EvaluationStatus, EvaluationTask, EvaluatorKind, EvaluatorResult,
+    EvaluatorSpec, EvaluatorStatus, JudgeLabel, MetricDelta, VerificationCheck, evaluate_manifest,
+    evaluate_manifest_at, load_evaluation_manifest, write_evaluation_result,
 };
 pub use extension::{AgentImprovementExtensionConfig, install};
 pub use schema::{

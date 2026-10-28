@@ -1,6 +1,7 @@
 # Agent Improvement Integration Plan
 
-Status: Milestone 3 complete; Milestones 1–2 complete; Milestones 4–8 planned
+Status: Milestone 4 offline replay/evaluation core complete; Milestones 1–3
+complete; live model-runner execution and Milestones 5–8 remain gated
 
 ## Objective
 
@@ -84,8 +85,11 @@ privacy, provenance, rollback, and human-review boundaries.
 
 ## Roadmap and milestones
 
-Milestones 1–3 are complete in this working tree. Milestone 4 is the next
-implementation increment; the remaining milestones are ordered by the
+Milestones 1–4 are implemented in this working tree. Milestone 4 intentionally
+lands as an offline replay/evaluation core: it consumes matched artifacts
+produced by separately controlled baseline and treatment runs. Launching live
+model runs from the evaluator remains a separately gated safety increment. The
+remaining milestones are ordered by the
 dependency that makes each new form of autonomy safe and measurable. A
 milestone is not considered complete merely because its code exists; its exit
 gate and regression evidence must also be satisfied.
@@ -95,7 +99,7 @@ gate and regression evidence must also be satisfied.
 | 1. Safe local experience foundation | Deterministic, privacy-bounded cards can be created explicitly and retrieved as advisory context | Essential | Existing trace and extension systems | Complete |
 | 2. Automatic candidate capture and review | Long sessions produce reviewable candidates without requiring a manual CLI step; nothing is promoted automatically | Immediately next | 1 | Complete |
 | 3. Evidence-rich lessons and retrieval | Cards describe recurring failure signatures, interventions, outcomes, scope, and confidence rather than only coarse summaries | High value | 2 | Complete |
-| 4. Replay and evaluation harness | Baseline versus memory-assisted work can be measured on paired and held-out tasks | Essential before autonomy | 2–3 | Planned |
+| 4. Replay and evaluation harness | Baseline versus memory-assisted artifacts can be measured on paired and held-out tasks with bounded provenance and cost accounting | Essential before autonomy | 2–3 | Offline core complete; live runner gated |
 | 5. Offline proposer and candidate artifacts | A focused skill or offline model call can propose cards, skills, or guidance diffs for review | High value | 3–4 | Planned |
 | 6. Promotion, rollback, and policy control plane | Candidate changes become versioned, scoped, reversible active knowledge only after evidence and review | Essential | 4–5 | Planned |
 | 7. Slow loop for long-horizon improvement | Periodic analysis finds recurring patterns, stale knowledge, and missed evidence, then proposes the next experiments | High value / research | 4–6 | Planned |
@@ -284,9 +288,20 @@ required for a paired baseline/treatment claim.
 
 ### Milestone 4 — Replay and evaluation harness
 
+**Implementation status: offline replay/evaluation core complete; live runner
+execution remains separately gated.**
+
 **Intent:** turn “this card seems helpful” into a repeatable baseline-versus-
 assisted experiment before introducing model-generated changes or automatic
 promotion.
+
+**Implementation boundary:** the first implementation evaluates two existing
+trace bundles per scenario. It does not launch a model, inherit credentials,
+modify a worktree, or read/write the active card store. This is intentional:
+the result schema and pairing/isolation checks can run in offline CI before a
+live runner is trusted with Codex's approval, sandbox, and repository
+boundaries. A live runner must be added as a separately gated adapter that
+produces the same bundle contract.
 
 **Deliverables:**
 
@@ -294,15 +309,17 @@ promotion.
   repository snapshot/worktree, expected verification command(s), allowed
   configuration, time/token budget, and an evaluator type. Keep scenario
   inputs and private traces separate from published aggregate results.
-- Add an evaluation command or library, for example:
+- Add an offline evaluation command/library, for example:
 
   ```text
   codex debug agent-improvement eval <SCENARIO_SET> \
-    --baseline <CONFIG> --treatment <CONFIG> --output <RESULTS>
+    --output <RESULTS>
   ```
 
-  It must run matched baseline and memory-assisted conditions in isolated
-  worktrees or sandboxes and preserve the exact card/policy versions used.
+  It must validate that matched baseline and memory-assisted conditions were
+  recorded from isolated worktrees or sandboxes and preserve the exact
+  card/policy versions used. The current command consumes those artifacts;
+  it does not launch a fresh model run.
 - Reuse rollout traces to calculate outcome metrics: task verification
   success, incomplete verification, repeated failure, retry count, tool and
   terminal operations, tokens, wall time, cancellation, policy/permission
@@ -329,10 +346,12 @@ promotion.
 - a small smoke suite that runs in CI without network/model credentials, plus
   an opt-in live suite for real model comparisons.
 
-**Exit gate:** the project can answer, with reproducible evidence, whether a
-  card or retrieval policy changes success, cost, latency, verification, and
-  safety outcomes on held-out tasks. The evaluation harness becomes a required
-  dependency for Milestones 5 and 6.
+**Exit gate:** given reproducible paired artifacts, the project can answer
+whether a card or retrieval policy changes success, cost, latency,
+verification, and safety outcomes on held-out tasks. The evaluation harness
+becomes a required dependency for Milestones 5 and 6. A live runner is not
+implicitly part of this gate; it requires its own permission and isolation
+review.
 
 ### Milestone 5 — Offline proposer and candidate artifacts
 
@@ -888,9 +907,9 @@ The focused validation completed with these results:
 
 - `cargo test -p codex-config agent_improvement`: 2 passed;
 - `cargo test -p codex-core --lib load_config_resolves_agent_improvement_settings`: 1 passed;
-- `cargo test -p codex-agent-improvement-extension`: 44 passed;
-- `cargo test -p codex-cli --test agent_improvement`: 5 passed;
-- `cargo test -p codex-cli debug_agent_improvement`: 3 parser tests passed;
+- `cargo test -p codex-agent-improvement-extension`: 50 passed;
+- `cargo test -p codex-cli --test agent_improvement`: 6 passed;
+- `cargo test -p codex-cli debug_agent_improvement`: 4 parser tests passed;
 - `cargo test -p codex-app-server extensions`: 6 unit tests and 2 filtered
   integration tests passed;
 - `cargo test -p codex-rollout-trace thread`: root/child trace context tests passed;
@@ -911,6 +930,13 @@ feedback, followed/verified attribution, and a fixed offline retrieval fixture
 with precision, irrelevance, ordering, and context-budget assertions. The
 extension records exposure when a card is selected, but it does not infer that
 the recommendation was followed or caused a later result.
+
+Milestone 4 additionally verifies that paired manifests reject non-memory
+configuration differences and overlapping worktrees, that evaluation output
+cannot overlap the primary checkout or active card store, that replay failures,
+missing judge evidence, and cost limits remain explicit, and that aggregate
+results omit prompts, command tokens, and local paths. The evaluator consumes
+pre-recorded baseline/treatment bundles and does not launch live model runs.
 
 An earlier broader `cargo test -p codex-core config` run compiled the target
 and then aborted in the unrelated existing
@@ -958,3 +984,6 @@ cross-task evidence.
 | 3.2 Structured store and retrieval | complete | Lesson merging, append-only lifecycle updates, workspace filtering, conflict suppression, confidence/evidence/recency/recurrence ranking, and retirement |
 | 3.3 Adoption attribution and controls | complete | Automatic exposure recording plus feedback, followed/verified outcome recording and CLI controls |
 | 3.4 Milestone 3 tests and documentation | complete | 44 extension tests, 5 CLI integration tests, migration/privacy/ranking/fixture coverage, formatting, and updated usage docs |
+| 4.1 Evaluation manifest and pairing contract | complete | Versioned private scenario manifest, held-out split requirement, exact config/policy/card provenance, worktree disjointness, and protected output paths |
+| 4.2 Offline replay metrics and evaluators | complete | Reduced-trace replay metrics for verification, failure/retry, tool/terminal work, tokens, latency, cancellation, policy events, corrections, deterministic checks, and labeled judge inputs |
+| 4.3 Result schema, CLI, tests, and usage docs | complete | Redacted aggregate results, partial/cost-limited states, false-attribution tests, 50 extension tests, 6 CLI integration tests, and paired-evaluation documentation |
