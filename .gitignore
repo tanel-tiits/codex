@@ -32,6 +32,7 @@ result
 # cli tools
 CLAUDE.md
 .claude/
+AGENTS.md
 AGENTS.override.md
 
 # caches

@@ -5,6 +5,8 @@ use clap_complete::Shell;
 use clap_complete::generate;
 use codex_agent_improvement_extension::AttributionState;
 use codex_agent_improvement_extension::CandidateStatus;
+use codex_agent_improvement_extension::EvolutionConfig;
+use codex_agent_improvement_extension::EvolutionOutcome;
 use codex_agent_improvement_extension::ExperienceCandidate;
 use codex_agent_improvement_extension::FeedbackState;
 use codex_agent_improvement_extension::ImprovementCandidate;
@@ -12,22 +14,29 @@ use codex_agent_improvement_extension::ImprovementCandidateStatus;
 use codex_agent_improvement_extension::ImprovementEvidenceCatalog;
 use codex_agent_improvement_extension::accept_proposal;
 use codex_agent_improvement_extension::append_card;
+use codex_agent_improvement_extension::apply_card_maintenance;
 use codex_agent_improvement_extension::candidates_path;
 use codex_agent_improvement_extension::cards_path;
+use codex_agent_improvement_extension::compact_card_store;
 use codex_agent_improvement_extension::current_unix_ms;
 use codex_agent_improvement_extension::evaluate_manifest;
 use codex_agent_improvement_extension::evaluate_proposal;
+use codex_agent_improvement_extension::evolve_root;
+use codex_agent_improvement_extension::export_card_store;
 use codex_agent_improvement_extension::find_candidate;
+use codex_agent_improvement_extension::forget_card_store;
 use codex_agent_improvement_extension::load_candidates;
 use codex_agent_improvement_extension::load_cards;
 use codex_agent_improvement_extension::load_evaluation_manifest;
 use codex_agent_improvement_extension::load_improvement_candidate;
 use codex_agent_improvement_extension::load_promotion_policy;
 use codex_agent_improvement_extension::load_runtime_cards;
+use codex_agent_improvement_extension::plan_card_maintenance;
 use codex_agent_improvement_extension::promote_proposal_with_policy;
 use codex_agent_improvement_extension::promotion_status;
 use codex_agent_improvement_extension::record_card_feedback;
 use codex_agent_improvement_extension::record_card_outcome;
+use codex_agent_improvement_extension::record_evolution_outcome;
 use codex_agent_improvement_extension::reject_proposal;
 use codex_agent_improvement_extension::render_cards;
 use codex_agent_improvement_extension::retire_card;
@@ -382,6 +391,9 @@ enum DebugAgentImprovementSubcommand {
 
     /// Manage active lesson lifecycle and adoption metadata.
     Cards(DebugAgentImprovementCardsCommand),
+
+    /// Run the bounded, offline slow loop over local improvement history.
+    Evolve(DebugAgentImprovementEvolveCommand),
 }
 
 #[derive(Debug, Parser)]
@@ -612,6 +624,177 @@ struct DebugAgentImprovementCandidatesCommand {
 struct DebugAgentImprovementCardsCommand {
     #[command(subcommand)]
     subcommand: DebugAgentImprovementCardsSubcommand,
+}
+
+#[derive(Debug, Parser)]
+struct DebugAgentImprovementEvolveCommand {
+    #[command(subcommand)]
+    subcommand: DebugAgentImprovementEvolveSubcommand,
+}
+
+#[derive(Debug, clap::Subcommand)]
+enum DebugAgentImprovementEvolveSubcommand {
+    /// Aggregate local cards and candidates into bounded experiment briefs.
+    Run(DebugAgentImprovementEvolveRunCommand),
+
+    /// Record an explicit held-out outcome for a generated experiment brief.
+    Record(DebugAgentImprovementEvolveRecordCommand),
+
+    /// Plan or explicitly apply stale, negative-feedback, and retention maintenance.
+    Maintain(DebugAgentImprovementEvolveMaintainCommand),
+
+    /// Export the canonical merged card view without changing the active store.
+    Export(DebugAgentImprovementEvolveExportCommand),
+
+    /// Explicitly remove named cards after archiving the previous store bytes.
+    Forget(DebugAgentImprovementEvolveForgetCommand),
+}
+
+#[derive(Debug, Parser)]
+struct DebugAgentImprovementEvolveRunCommand {
+    /// Agent-improvement root containing cards.jsonl, candidates.jsonl, and history.
+    #[arg(long = "store", value_name = "DIR", required = true)]
+    store: PathBuf,
+
+    /// Optional JSON output file. Without it, the report is printed only.
+    #[arg(long = "output", short = 'o', value_name = "FILE")]
+    output: Option<PathBuf>,
+
+    /// Maximum cards examined in one slow-loop run.
+    #[arg(long = "max-cards", default_value_t = 4096)]
+    max_cards_examined: usize,
+
+    /// Maximum candidates examined in one slow-loop run.
+    #[arg(long = "max-candidates", default_value_t = 4096)]
+    max_candidates_examined: usize,
+
+    /// Maximum experiment briefs emitted.
+    #[arg(long = "max-briefs", default_value_t = 16)]
+    max_briefs: usize,
+
+    /// Recurrence threshold for repeated patterns.
+    #[arg(long = "min-recurrence", default_value_t = 2)]
+    min_recurrence: u32,
+
+    /// Exposure threshold for not-followed signals.
+    #[arg(long = "min-exposure", default_value_t = 3)]
+    min_exposure: u32,
+
+    /// Age in days after which an unexposed card is considered stale.
+    #[arg(long = "stale-after-days", default_value_t = 180)]
+    stale_after_days: u32,
+
+    /// Maximum active cards targeted by retention planning.
+    #[arg(long = "max-active-cards", default_value_t = 256)]
+    max_active_cards: usize,
+
+    /// Failed held-out attempts after which a brief is suppressed.
+    #[arg(long = "max-failed-attempts", default_value_t = 3)]
+    max_failed_attempts: u32,
+
+    /// Minimum held-out scenarios requested by each brief.
+    #[arg(long = "minimum-evaluation-scenarios", default_value_t = 2)]
+    minimum_evaluation_scenarios: u32,
+}
+
+#[derive(Debug, Parser)]
+struct DebugAgentImprovementEvolveRecordCommand {
+    /// Agent-improvement root containing evolution-history.jsonl.
+    #[arg(long = "store", value_name = "DIR", required = true)]
+    store: PathBuf,
+
+    /// Stable brief ID returned by `evolve run`.
+    #[arg(value_name = "BRIEF_ID")]
+    brief_id: String,
+
+    /// Brief fingerprint returned by `evolve run`.
+    #[arg(long = "fingerprint", value_name = "FINGERPRINT", required = true)]
+    fingerprint: String,
+
+    /// Outcome: improved, no_improvement, regression, inconclusive, or retired.
+    #[arg(long = "outcome", value_name = "OUTCOME", required = true)]
+    outcome: String,
+
+    /// Actor recorded in the append-only history event.
+    #[arg(long = "actor", value_name = "ACTOR", default_value = "user")]
+    actor: String,
+
+    /// Optional redacted evaluation-result fingerprint.
+    #[arg(long = "evaluation-result", value_name = "FINGERPRINT")]
+    evaluation_result_fingerprint: Option<String>,
+
+    /// Optional task-success change in basis points.
+    #[arg(long = "task-success-delta-bps", value_name = "BPS")]
+    task_success_delta_bps: Option<i32>,
+
+    /// Optional verification-success change in basis points.
+    #[arg(long = "verification-delta-bps", value_name = "BPS")]
+    verification_delta_bps: Option<i32>,
+
+    /// Human-readable, bounded outcome rationale.
+    #[arg(
+        long = "reason",
+        value_name = "TEXT",
+        default_value = "explicit experiment outcome"
+    )]
+    reason: String,
+}
+
+#[derive(Debug, Parser)]
+struct DebugAgentImprovementEvolveMaintainCommand {
+    /// Agent-improvement root containing cards.jsonl.
+    #[arg(long = "store", value_name = "DIR", required = true)]
+    store: PathBuf,
+
+    /// Age in days after which an unexposed active card is stale.
+    #[arg(long = "stale-after-days", default_value_t = 180)]
+    stale_after_days: u32,
+
+    /// Maximum active cards retained by the plan.
+    #[arg(long = "max-active-cards", default_value_t = 256)]
+    max_active_cards: usize,
+
+    /// Apply the plan by retiring selected cards.
+    #[arg(long = "apply", default_value_t = false)]
+    apply: bool,
+
+    /// Also compact the append-only store; requires --apply and --archive.
+    #[arg(long = "compact", default_value_t = false)]
+    compact: bool,
+
+    /// Archive destination required for compaction.
+    #[arg(long = "archive", value_name = "FILE")]
+    archive: Option<PathBuf>,
+}
+
+#[derive(Debug, Parser)]
+struct DebugAgentImprovementEvolveExportCommand {
+    /// Agent-improvement root containing cards.jsonl.
+    #[arg(long = "store", value_name = "DIR", required = true)]
+    store: PathBuf,
+
+    /// JSONL export destination.
+    #[arg(long = "output", short = 'o', value_name = "FILE", required = true)]
+    output: PathBuf,
+
+    /// Include retired cards in the canonical export.
+    #[arg(long = "include-retired", default_value_t = false)]
+    include_retired: bool,
+}
+
+#[derive(Debug, Parser)]
+struct DebugAgentImprovementEvolveForgetCommand {
+    /// Agent-improvement root containing cards.jsonl.
+    #[arg(long = "store", value_name = "DIR", required = true)]
+    store: PathBuf,
+
+    /// Archive destination required before permanent removal.
+    #[arg(long = "archive", value_name = "FILE", required = true)]
+    archive: PathBuf,
+
+    /// One or more exact card IDs to remove from the active store.
+    #[arg(value_name = "CARD_ID", required = true, num_args = 1..)]
+    card_ids: Vec<String>,
 }
 
 #[derive(Debug, clap::Subcommand)]
@@ -2267,6 +2450,9 @@ async fn cli_main(
                     DebugAgentImprovementSubcommand::Cards(cmd) => {
                         run_debug_agent_improvement_cards_command(cmd)?;
                     }
+                    DebugAgentImprovementSubcommand::Evolve(cmd) => {
+                        run_debug_agent_improvement_evolve_command(cmd)?;
+                    }
                 }
             }
             DebugSubcommand::TraceReduce(cmd) => {
@@ -2806,6 +2992,120 @@ fn run_debug_agent_improvement_cards_command(
                 })?;
             println!("{}", serde_json::to_string_pretty(&card)?);
         }
+    }
+    Ok(())
+}
+
+fn run_debug_agent_improvement_evolve_command(
+    cmd: DebugAgentImprovementEvolveCommand,
+) -> anyhow::Result<()> {
+    match cmd.subcommand {
+        DebugAgentImprovementEvolveSubcommand::Run(cmd) => {
+            let config = EvolutionConfig {
+                max_cards_examined: cmd.max_cards_examined,
+                max_candidates_examined: cmd.max_candidates_examined,
+                max_briefs: cmd.max_briefs,
+                min_recurrence: cmd.min_recurrence,
+                min_exposure: cmd.min_exposure,
+                stale_after_days: cmd.stale_after_days,
+                max_active_cards: cmd.max_active_cards,
+                max_failed_attempts: cmd.max_failed_attempts,
+                minimum_evaluation_scenarios: cmd.minimum_evaluation_scenarios,
+            };
+            let report = evolve_root(&cmd.store, &config, current_unix_ms())?;
+            let output = serde_json::to_vec_pretty(&report)?;
+            if let Some(path) = cmd.output {
+                ensure_evolution_output_path(&cmd.store, &path)?;
+                std::fs::write(path, &output)?;
+            }
+            println!("{}", String::from_utf8(output)?);
+        }
+        DebugAgentImprovementEvolveSubcommand::Record(cmd) => {
+            let outcome = EvolutionOutcome::parse(&cmd.outcome).ok_or_else(|| {
+                anyhow::anyhow!(
+                    "invalid evolution outcome {:?}; expected improved, no_improvement, regression, inconclusive, or retired",
+                    cmd.outcome
+                )
+            })?;
+            let event = record_evolution_outcome(
+                &cmd.store,
+                cmd.brief_id,
+                cmd.fingerprint,
+                cmd.actor,
+                outcome,
+                cmd.evaluation_result_fingerprint,
+                cmd.task_success_delta_bps,
+                cmd.verification_delta_bps,
+                cmd.reason,
+                current_unix_ms(),
+            )?;
+            println!("{}", serde_json::to_string_pretty(&event)?);
+        }
+        DebugAgentImprovementEvolveSubcommand::Maintain(cmd) => {
+            let config = EvolutionConfig {
+                stale_after_days: cmd.stale_after_days,
+                max_active_cards: cmd.max_active_cards,
+                ..EvolutionConfig::default()
+            };
+            config.validate()?;
+            let cards = load_cards(&cmd.store)?;
+            let plan = plan_card_maintenance(&cards, &config, current_unix_ms());
+            let retired_count = if cmd.apply {
+                apply_card_maintenance(&cmd.store, &plan)?
+            } else {
+                0
+            };
+            anyhow::ensure!(
+                !cmd.compact || cmd.apply,
+                "--compact requires --apply so maintenance remains explicit"
+            );
+            let compacted = if cmd.compact {
+                let archive = cmd.archive.as_ref().ok_or_else(|| {
+                    anyhow::anyhow!("--compact requires an --archive destination")
+                })?;
+                Some(compact_card_store(&cmd.store, archive)?)
+            } else {
+                None
+            };
+            println!(
+                "{}",
+                serde_json::json!({
+                    "plan": plan,
+                    "retired_count": retired_count,
+                    "compacted": compacted,
+                })
+            );
+        }
+        DebugAgentImprovementEvolveSubcommand::Export(cmd) => {
+            ensure_evolution_output_path(&cmd.store, &cmd.output)?;
+            let exported = export_card_store(&cmd.store, &cmd.output, cmd.include_retired)?;
+            println!(
+                "{}",
+                serde_json::json!({"output": cmd.output, "exported_cards": exported})
+            );
+        }
+        DebugAgentImprovementEvolveSubcommand::Forget(cmd) => {
+            let report = forget_card_store(&cmd.store, &cmd.card_ids, &cmd.archive)?;
+            println!("{}", serde_json::to_string_pretty(&report)?);
+        }
+    }
+    Ok(())
+}
+
+fn ensure_evolution_output_path(
+    store: &std::path::Path,
+    output: &std::path::Path,
+) -> anyhow::Result<()> {
+    let output_identity = path_identity_for_cli(&output.to_path_buf());
+    for protected in [
+        cards_path(store),
+        candidates_path(store),
+        codex_agent_improvement_extension::evolution_history_path(store),
+    ] {
+        anyhow::ensure!(
+            output_identity != path_identity_for_cli(&protected),
+            "evolution output must not overwrite local improvement state"
+        );
     }
     Ok(())
 }
@@ -4492,6 +4792,80 @@ enabled = true
             let mut args = vec!["codex", "debug", "agent-improvement", "proposals"];
             args.extend(command);
             MultitoolCli::try_parse_from(args).expect("promotion command parses");
+        }
+    }
+
+    #[test]
+    fn debug_agent_improvement_evolve_parses_slow_loop_commands() {
+        let cli = MultitoolCli::try_parse_from([
+            "codex",
+            "debug",
+            "agent-improvement",
+            "evolve",
+            "run",
+            "--store",
+            "/tmp/agent-improvement",
+            "--max-briefs",
+            "4",
+            "--output",
+            "/tmp/briefs.json",
+        ])
+        .expect("parse evolve run");
+        let Some(Subcommand::Debug(DebugCommand {
+            subcommand:
+                DebugSubcommand::AgentImprovement(DebugAgentImprovementCommand {
+                    subcommand: DebugAgentImprovementSubcommand::Evolve(command),
+                }),
+        })) = cli.subcommand
+        else {
+            panic!("expected evolve command");
+        };
+        let DebugAgentImprovementEvolveSubcommand::Run(command) = command.subcommand else {
+            panic!("expected evolve run command");
+        };
+        assert_eq!(command.store, PathBuf::from("/tmp/agent-improvement"));
+        assert_eq!(command.max_briefs, 4);
+        assert_eq!(command.output, Some(PathBuf::from("/tmp/briefs.json")));
+
+        for args in [
+            vec![
+                "record",
+                "experiment_123",
+                "--store",
+                "/tmp/agent-improvement",
+                "--fingerprint",
+                "experiment_fingerprint_123",
+                "--outcome",
+                "no_improvement",
+            ],
+            vec![
+                "maintain",
+                "--store",
+                "/tmp/agent-improvement",
+                "--apply",
+                "--compact",
+                "--archive",
+                "/tmp/archive.jsonl",
+            ],
+            vec![
+                "export",
+                "--store",
+                "/tmp/agent-improvement",
+                "--output",
+                "/tmp/export.jsonl",
+            ],
+            vec![
+                "forget",
+                "--store",
+                "/tmp/agent-improvement",
+                "--archive",
+                "/tmp/forget.jsonl",
+                "card_123",
+            ],
+        ] {
+            let mut argv = vec!["codex", "debug", "agent-improvement", "evolve"];
+            argv.extend(args);
+            MultitoolCli::try_parse_from(argv).expect("evolve command parses");
         }
     }
 

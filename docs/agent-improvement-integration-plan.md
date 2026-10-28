@@ -1,8 +1,8 @@
 # Agent Improvement Integration Plan
 
-Status: Milestone 6 promotion/rollback/policy control plane complete;
-Milestones 1–5 complete; live model-runner execution and Milestones 7–8
-remain gated
+Status: Milestone 7 slow-loop aggregation and maintenance complete;
+Milestones 1–6 complete; live model-runner execution and Milestone 8 remain
+gated
 
 ## Objective
 
@@ -86,7 +86,7 @@ privacy, provenance, rollback, and human-review boundaries.
 
 ## Roadmap and milestones
 
-Milestones 1–6 are implemented in this working tree. Milestone 4 intentionally
+Milestones 1–7 are implemented in this working tree. Milestone 4 intentionally
 lands as an offline replay/evaluation core: it consumes matched artifacts
 produced by separately controlled baseline and treatment runs. Launching live
 model runs from the evaluator remains a separately gated safety increment. The
@@ -103,7 +103,7 @@ gate and regression evidence must also be satisfied.
 | 4. Replay and evaluation harness | Baseline versus memory-assisted artifacts can be measured on paired and held-out tasks with bounded provenance and cost accounting | Essential before autonomy | 2–3 | Offline core complete; live runner gated |
 | 5. Offline proposer and candidate artifacts | A focused Skill and deterministic offline command can produce evidence-linked, review-only proposals for cards and bounded guidance/tooling changes | High value | 3–4 | Review-only core complete; live model proposer gated |
 | 6. Promotion, rollback, and policy control plane | Candidate changes become versioned, scoped, reversible active knowledge only after evidence and review | Essential | 4–5 | Complete; manual promotion only |
-| 7. Slow loop for long-horizon improvement | Periodic analysis finds recurring patterns, stale knowledge, and missed evidence, then proposes the next experiments | High value / research | 4–6 | Planned |
+| 7. Slow loop for long-horizon improvement | Periodic analysis finds recurring patterns, stale knowledge, and missed evidence, then proposes the next experiments | High value / research | 4–6 | Complete; deterministic/manual loop |
 | 8. Optional program-level evolution and transfer | Isolated evolution of skills, prompts, or extension policy can be explored across task families without mutating the live agent | Research only | 6–7 | Planned |
 
 ### Milestone 1 — Safe local experience foundation (complete)
@@ -511,48 +511,62 @@ schema, policy scope mismatch, kill switches, TTL filtering, non-card lane
 boundaries, and previous-card rollback. The CLI integration test exercises the
 complete manual lifecycle against a temporary store.
 
-### Milestone 7 — Slow loop for long-horizon improvement
+### Milestone 7 — Slow loop for long-horizon improvement (complete)
 
-**Intent:** capture the Meta^n-style slow loop: review a history of attempts,
-  identify repeated patterns or stagnation, and propose the next targeted
-  experiment rather than repeatedly storing near-duplicate cards.
+**Implementation status: complete for the deterministic/manual local loop;
+model-backed proposing, live execution, and automatic promotion remain gated.**
 
-**Deliverables:**
+The extension now provides `codex debug agent-improvement evolve` operations
+that run outside turn preparation and consume only bounded local cards,
+candidates, and explicit experiment outcomes. The aggregation layer identifies:
 
-- Add an explicit/manual or scheduled `evolve` operation that operates on
-  aggregate local evidence, not on the live turn hot path. It should identify
-  recurring failure signatures, repeated verification omissions, cards that are
-  frequently retrieved but not followed, conflicting recommendations, and
-  task families with no useful coverage.
-- Cluster and summarize episodes into experiment briefs containing the problem,
-  evidence, competing hypotheses, candidate changes, expected metric, and
-  evaluation set. The slow loop proposes; it does not promote.
-- Add bounded memory maintenance: duplicate merge, stale-card decay, negative
-  feedback, retention limits, archive/export, and explicit forgetting. Make
-  scope and repository identity part of clustering to prevent cross-project
-  contamination.
-- Track experiment history and stagnation. If a candidate repeatedly fails to
-  improve held-out outcomes, lower its priority or retire it instead of
-  endlessly retrying.
-- Allow the proposer instruction set to be updated only through the same
-  candidate/evaluation/promotion path. Do not let a successful experiment
-  silently rewrite its own evaluator.
+- recurring failure signatures;
+- repeated verification omissions;
+- frequently exposed cards with explicit `followed = no` attribution;
+- conflicting active recommendations in one task/scope/signature bucket; and
+- observed task-family/scope combinations with no useful active coverage.
 
-**Tests and verification:**
+Each deterministic experiment brief contains a stable ID and fingerprint,
+bounded card/candidate/trace provenance, the problem statement, competing
+hypotheses, card-lane candidate changes, an expected metric, and a held-out
+evaluation-set selection rule. The brief is an inert proposal; it cannot edit
+cards, prompts, Skills, `AGENTS.md`, configuration, permissions, or sandbox
+policy.
 
-- deterministic clustering and duplicate/contradiction fixtures;
-- bounded-budget tests for number of traces, cards, model calls, tokens, and
-  wall time examined by one evolution run;
-- stale/negative-feedback/forgetting tests;
-- cross-repository and cross-task-family isolation tests;
-- tests proving slow-loop output is a candidate/experiment brief and cannot
-  alter active behavior without Milestone 6 promotion;
-- repeated-run determinism tests for the non-model aggregation layer.
+The append-only `evolution-history.jsonl` store records explicit improved,
+no-improvement, regression, inconclusive, or retired outcomes. Repeated failed
+outcomes lower priority and suppress a brief after the configured threshold,
+preventing an unproductive experiment from being proposed indefinitely.
 
-**Exit gate:** a long history can produce a small, explainable set of new
-experiments with provenance, and the system can stop pursuing unproductive
-ideas. There must be evidence of improved held-out outcomes before calling the
-slow loop “learning.”
+Bounded maintenance is explicit and separate from the slow-loop report:
+
+- `maintain` plans stale decay, negative-feedback retirement, and active-card
+  retention; `--apply` retires selected cards without deleting history;
+- `compact` merges the canonical card view after archiving the previous JSONL;
+- `export` writes a canonical bounded JSONL snapshot; and
+- `forget` permanently removes named cards only after requiring an archive.
+
+The supported commands are:
+
+```text
+evolve run --store <ROOT> [--output <FILE>]
+evolve record --store <ROOT> <BRIEF_ID> --fingerprint <FP> --outcome <OUTCOME>
+evolve maintain --store <ROOT> [--apply] [--compact --archive <FILE>]
+evolve export --store <ROOT> --output <FILE>
+evolve forget --store <ROOT> --archive <FILE> <CARD_ID>...
+```
+
+**Tests and verification:** the focused suite covers deterministic multi-signal
+brief generation, held-out evaluation metadata, bounded budgets, repeated-run
+stability, stagnation suppression, stale/negative/retention planning,
+non-destructive retirement, archive-backed compaction, export, explicit
+forgetting, CLI parsing, and an end-to-end CLI lifecycle. The slow loop makes
+no model calls and does not promote its own output.
+
+**Exit gate:** complete. Long local histories produce a small explainable set
+of scoped experiments with provenance, and repeated failed outcomes stop being
+re-proposed. Held-out outcome improvement is still required before describing
+any resulting card or proposal as learned.
 
 ### Milestone 8 — Optional program-level evolution and transfer (research)
 
@@ -1008,6 +1022,13 @@ status output, malformed-store fail-closed behavior, and one-command rollback.
 The focused extension suite has 63 tests and the CLI agent-improvement suite
 has 8 integration tests; both include the complete manual promotion lifecycle.
 
+Milestone 7 additionally verifies deterministic multi-signal clustering,
+held-out experiment-set metadata, bounded history and stagnation suppression,
+stale/negative/retention planning, archive-backed compaction, canonical export,
+explicit forgetting, and non-destructive retirement. The focused extension
+suite now has 70 tests and the CLI agent-improvement suite has 9 integration
+tests; the slow loop makes no model calls and cannot promote its own output.
+
 An earlier broader `cargo test -p codex-core config` run compiled the target
 and then aborted in the unrelated existing
 `tools::handlers::multi_agents::tests::multi_agent_v2_spawn_agent_ignores_configured_max_depth`
@@ -1066,3 +1087,7 @@ cross-task evidence.
 | 6.3 Runtime card activation and rollback | complete | Card-only promotion, fail-closed retrieval filtering, previous-card restoration, retirement, and non-card lane boundary |
 | 6.4 Promotion CLI and inspection | complete | Validate/evaluate/accept/promote/rollback/retire/reject/status commands with JSON status/provenance output |
 | 6.5 Milestone 6 validation | complete | 63 extension tests, 8 CLI integration tests, parser coverage, formatting, and policy/store failure tests; automatic promotion remains disabled |
+| 7.1 Deterministic slow-loop aggregation | complete | Bounded recurring-failure, verification-omission, not-followed, conflict, and coverage-gap clustering into stable held-out experiment briefs |
+| 7.2 Experiment history and stagnation control | complete | Append-only `evolution-history.jsonl`, explicit outcomes, priority decay, and suppression after repeated failed attempts |
+| 7.3 Bounded card maintenance | complete | Stale/negative/retention planning, explicit retirement, archive-backed compaction, canonical export, and explicit forgetting |
+| 7.4 Evolve CLI and validation | complete | Run/record/maintain/export/forget commands, parser coverage, 70 extension tests, 9 CLI integration tests, and deterministic end-to-end coverage |

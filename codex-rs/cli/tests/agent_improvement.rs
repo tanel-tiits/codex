@@ -894,3 +894,147 @@ fn card_lifecycle_commands_record_adoption_and_retirement() -> Result<()> {
     assert_eq!(retired_card["status"], "retired");
     Ok(())
 }
+
+#[test]
+fn evolve_command_runs_records_maintains_exports_and_forgets_explicitly() -> Result<()> {
+    let home = TempDir::new()?;
+    let store = TempDir::new()?;
+    let mut card = ExperienceCard::new(
+        "trace-evolve-cli",
+        current_unix_ms(),
+        TaskFamily::Coding,
+        FailureClass::CommandFailure,
+        AgentImprovementEvidence::default(),
+        Vec::new(),
+        "reproduce the first failing command",
+        Vec::new(),
+    );
+    card.recurrence.count = 3;
+    append_card(store.path(), &card)?;
+
+    let report_path = store.path().join("briefs.json");
+    let mut run = codex_command(home.path())?;
+    let output = run
+        .args([
+            "debug",
+            "agent-improvement",
+            "evolve",
+            "run",
+            "--store",
+            store.path().to_str().expect("UTF-8 store path"),
+            "--output",
+            report_path.to_str().expect("UTF-8 report path"),
+        ])
+        .output()?;
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let report: Value = serde_json::from_slice(&output.stdout)?;
+    assert_eq!(report["schema_version"], 1);
+    assert_eq!(report["cards_examined"], 1);
+    let brief = report["briefs"]
+        .as_array()
+        .expect("brief array")
+        .first()
+        .expect("brief");
+    let brief_id = brief["brief_id"].as_str().expect("brief ID");
+    let fingerprint = brief["fingerprint"].as_str().expect("brief fingerprint");
+    assert_eq!(
+        serde_json::from_slice::<Value>(&std::fs::read(&report_path)?)?,
+        report
+    );
+
+    let mut record = codex_command(home.path())?;
+    let output = record
+        .args([
+            "debug",
+            "agent-improvement",
+            "evolve",
+            "record",
+            brief_id,
+            "--store",
+            store.path().to_str().expect("UTF-8 store path"),
+            "--fingerprint",
+            fingerprint,
+            "--outcome",
+            "improved",
+            "--reason",
+            "held-out task success improved",
+        ])
+        .output()?;
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let event: Value = serde_json::from_slice(&output.stdout)?;
+    assert_eq!(event["outcome"], "improved");
+
+    let mut maintain = codex_command(home.path())?;
+    let output = maintain
+        .args([
+            "debug",
+            "agent-improvement",
+            "evolve",
+            "maintain",
+            "--store",
+            store.path().to_str().expect("UTF-8 store path"),
+            "--apply",
+        ])
+        .output()?;
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let maintenance: Value = serde_json::from_slice(&output.stdout)?;
+    assert_eq!(maintenance["retired_count"], 0);
+
+    let export_path = store.path().join("export.jsonl");
+    let mut export = codex_command(home.path())?;
+    let output = export
+        .args([
+            "debug",
+            "agent-improvement",
+            "evolve",
+            "export",
+            "--store",
+            store.path().to_str().expect("UTF-8 store path"),
+            "--output",
+            export_path.to_str().expect("UTF-8 export path"),
+        ])
+        .output()?;
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert_eq!(std::fs::read_to_string(&export_path)?.lines().count(), 1);
+
+    let archive_path = store.path().join("forget-archive.jsonl");
+    let mut forget = codex_command(home.path())?;
+    let output = forget
+        .args([
+            "debug",
+            "agent-improvement",
+            "evolve",
+            "forget",
+            "--store",
+            store.path().to_str().expect("UTF-8 store path"),
+            "--archive",
+            archive_path.to_str().expect("UTF-8 archive path"),
+            &card.card_id,
+        ])
+        .output()?;
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let forgotten: Value = serde_json::from_slice(&output.stdout)?;
+    assert_eq!(forgotten["removed_card_ids"][0], card.card_id);
+    assert!(std::fs::read_to_string(&archive_path)?.contains("trace-evolve-cli"));
+    Ok(())
+}

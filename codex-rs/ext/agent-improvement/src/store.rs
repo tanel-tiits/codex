@@ -9,6 +9,7 @@ use std::path::{Path, PathBuf};
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use codex_utils_string::truncate_middle_with_token_budget;
+use serde::Serialize;
 use serde_json::from_str;
 
 use crate::TaskFamily;
@@ -220,6 +221,128 @@ pub fn retire_card(root: &Path, card_id: &str) -> io::Result<bool> {
         return Ok(false);
     }
     append_card(root, &card.with_status(CardStatus::Retired))
+}
+
+/// Retires a bounded set of cards in one maintenance pass. Retired records
+/// remain auditable in the append-only store but are excluded from retrieval.
+pub fn retire_cards(root: &Path, card_ids: &[String]) -> io::Result<usize> {
+    let wanted = card_ids.iter().collect::<BTreeSet<_>>();
+    if wanted.is_empty() {
+        return Ok(0);
+    }
+    let cards = load_cards(root)?;
+    let mut retired = 0;
+    for card in cards
+        .iter()
+        .filter(|card| wanted.contains(&card.card_id) && card.status == CardStatus::Active)
+    {
+        append_record(root, &card.with_status(CardStatus::Retired))?;
+        retired += 1;
+    }
+    Ok(retired)
+}
+
+/// Summary returned by an explicit card-store rewrite operation.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct CardStoreRewriteReport {
+    pub records_before: usize,
+    pub records_after: usize,
+    pub archived: bool,
+    pub removed_card_ids: Vec<String>,
+}
+
+/// Exports the canonical, merged card view as JSONL. The active store is not
+/// modified; retired cards are omitted unless `include_retired` is true.
+pub fn export_cards(root: &Path, output: &Path, include_retired: bool) -> io::Result<usize> {
+    let store_path = cards_path(root);
+    ensure_distinct_store_path(&store_path, output)?;
+    let cards = load_cards(root)?;
+    let selected = cards
+        .into_iter()
+        .filter(|card| include_retired || card.status == CardStatus::Active)
+        .collect::<Vec<_>>();
+    write_card_snapshot(output, &selected, false)?;
+    Ok(selected.len())
+}
+
+/// Compacts the append-only store into its canonical merged representation.
+/// The original bytes must be archived first so this operation remains
+/// recoverable. This is intentionally a slow, explicit maintenance operation.
+pub fn compact_cards(root: &Path, archive: &Path) -> io::Result<CardStoreRewriteReport> {
+    let store_path = cards_path(root);
+    let records_before = count_non_empty_records(&store_path)?;
+    if records_before == 0 {
+        return Ok(CardStoreRewriteReport {
+            records_before: 0,
+            records_after: 0,
+            archived: false,
+            removed_card_ids: Vec::new(),
+        });
+    }
+    ensure_distinct_store_path(&store_path, archive)?;
+    archive_store(&store_path, archive)?;
+    let cards = load_cards(root)?;
+    write_card_snapshot(&store_path, &cards, true)?;
+    Ok(CardStoreRewriteReport {
+        records_before,
+        records_after: cards.len(),
+        archived: true,
+        removed_card_ids: Vec::new(),
+    })
+}
+
+/// Permanently removes explicitly named cards from the active store after
+/// archiving the pre-rewrite bytes. This is the only card-store operation that
+/// deletes durable card records; callers must provide an archive destination.
+pub fn forget_cards(
+    root: &Path,
+    card_ids: &[String],
+    archive: &Path,
+) -> io::Result<CardStoreRewriteReport> {
+    let store_path = cards_path(root);
+    let records_before = count_non_empty_records(&store_path)?;
+    if records_before == 0 {
+        return Ok(CardStoreRewriteReport {
+            records_before: 0,
+            records_after: 0,
+            archived: false,
+            removed_card_ids: Vec::new(),
+        });
+    }
+    let wanted = card_ids.iter().cloned().collect::<BTreeSet<_>>();
+    if wanted.is_empty() {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            "at least one card ID is required for explicit forgetting",
+        ));
+    }
+    ensure_distinct_store_path(&store_path, archive)?;
+    let cards = load_cards(root)?;
+    let removed_card_ids = cards
+        .iter()
+        .filter(|card| wanted.contains(&card.card_id))
+        .map(|card| card.card_id.clone())
+        .collect::<Vec<_>>();
+    if removed_card_ids.is_empty() {
+        return Ok(CardStoreRewriteReport {
+            records_before,
+            records_after: cards.len(),
+            archived: false,
+            removed_card_ids,
+        });
+    }
+    archive_store(&store_path, archive)?;
+    let retained = cards
+        .into_iter()
+        .filter(|card| !wanted.contains(&card.card_id))
+        .collect::<Vec<_>>();
+    write_card_snapshot(&store_path, &retained, true)?;
+    Ok(CardStoreRewriteReport {
+        records_before,
+        records_after: retained.len(),
+        archived: true,
+        removed_card_ids,
+    })
 }
 
 /// Records that cards were shown to the model. This is exposure evidence only;
@@ -544,6 +667,124 @@ fn append_record(root: &Path, card: &ExperienceCard) -> io::Result<bool> {
     record.push(b'\n');
     file.write_all(&record)?;
     Ok(true)
+}
+
+fn count_non_empty_records(path: &Path) -> io::Result<usize> {
+    let file = match File::open(path) {
+        Ok(file) => file,
+        Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(0),
+        Err(error) => return Err(error),
+    };
+    BufReader::new(file)
+        .lines()
+        .try_fold(0usize, |count, line| {
+            let line = line?;
+            Ok::<_, io::Error>(count + usize::from(!line.trim().is_empty()))
+        })
+}
+
+fn ensure_distinct_store_path(store_path: &Path, output: &Path) -> io::Result<()> {
+    if normalized_path(store_path) == normalized_path(output) {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            "maintenance output must not overwrite the active card store",
+        ));
+    }
+    Ok(())
+}
+
+fn normalized_path(path: &Path) -> PathBuf {
+    if let Ok(path) = std::fs::canonicalize(path) {
+        return path;
+    }
+    if path.is_absolute() {
+        path.to_path_buf()
+    } else {
+        std::env::current_dir()
+            .unwrap_or_else(|_| PathBuf::from("."))
+            .join(path)
+    }
+}
+
+fn archive_store(store_path: &Path, archive: &Path) -> io::Result<()> {
+    ensure_distinct_store_path(store_path, archive)?;
+    let data = std::fs::read(store_path)?;
+    if let Some(parent) = archive
+        .parent()
+        .filter(|parent| !parent.as_os_str().is_empty())
+    {
+        std::fs::create_dir_all(parent)?;
+    }
+    let mut file = OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .open(archive)?;
+    file.write_all(&data)?;
+    Ok(())
+}
+
+fn write_card_snapshot(
+    path: &Path,
+    cards: &[ExperienceCard],
+    replace_existing: bool,
+) -> io::Result<()> {
+    if let Some(parent) = path
+        .parent()
+        .filter(|parent| !parent.as_os_str().is_empty())
+    {
+        std::fs::create_dir_all(parent)?;
+    }
+    for card in cards {
+        if !card.is_bounded() {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                "cannot write an unbounded experience card",
+            ));
+        }
+    }
+    let temp_path = path.with_extension(format!("jsonl.tmp-{}", std::process::id()));
+    if temp_path.exists() {
+        return Err(io::Error::new(
+            io::ErrorKind::AlreadyExists,
+            "card-store maintenance temporary file already exists",
+        ));
+    }
+    let result = (|| {
+        let mut file = OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(&temp_path)?;
+        let mut total_bytes = 0u64;
+        for card in cards {
+            let mut record = serde_json::to_vec(card)
+                .map_err(|error| io::Error::new(io::ErrorKind::InvalidData, error))?;
+            record.push(b'\n');
+            total_bytes = total_bytes.saturating_add(record.len() as u64);
+            if total_bytes > MAX_STORE_BYTES {
+                return Err(io::Error::new(
+                    io::ErrorKind::InvalidData,
+                    "compacted agent-improvement card store exceeds the size limit",
+                ));
+            }
+            file.write_all(&record)?;
+        }
+        file.sync_all()?;
+        if replace_existing && path.exists() {
+            let metadata = std::fs::symlink_metadata(path)?;
+            if metadata.file_type().is_symlink() || !metadata.is_file() {
+                return Err(io::Error::new(
+                    io::ErrorKind::InvalidInput,
+                    "active card store must be a regular file",
+                ));
+            }
+        }
+        std::fs::rename(&temp_path, path)?;
+        Ok(())
+    })();
+    if result.is_err() {
+        let _ = std::fs::remove_file(&temp_path);
+    }
+    result
 }
 
 fn workspace_matches(card: &ExperienceCard, context: &ExperienceRetrievalContext) -> bool {

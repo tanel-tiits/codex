@@ -252,6 +252,71 @@ can be written as:
 }
 \`\`\`
 
+## Run the slow improvement loop
+
+Milestone 7 adds a deterministic, offline slow loop over local cards,
+candidates, and explicit experiment outcomes. It runs outside turn preparation
+and never calls a model or changes active behavior:
+
+```bash
+codex debug agent-improvement evolve run \
+  --store "$CODEX_HOME/agent-improvement" \
+  --output /tmp/experiment-briefs.json
+```
+
+The report identifies recurring failure signatures, repeated verification
+omissions, frequently exposed cards that were explicitly not followed,
+conflicting recommendations, and task-family scopes without useful coverage.
+Each brief contains bounded provenance, competing hypotheses, a card-lane
+candidate change, an expected metric, and a held-out evaluation-set rule.
+
+After a separate evaluation, record the outcome so repeated failures are
+suppressed rather than proposed indefinitely:
+
+```bash
+codex debug agent-improvement evolve record \
+  --store "$CODEX_HOME/agent-improvement" \
+  experiment_<ID> \
+  --fingerprint experiment_fingerprint_<ID> \
+  --outcome improved \
+  --actor reviewer
+```
+
+Supported outcomes are `improved`, `no_improvement`, `regression`,
+`inconclusive`, and `retired`. The history is append-only in
+`evolution-history.jsonl`.
+
+Plan or explicitly apply bounded maintenance:
+
+```bash
+codex debug agent-improvement evolve maintain \
+  --store "$CODEX_HOME/agent-improvement"
+
+codex debug agent-improvement evolve maintain \
+  --store "$CODEX_HOME/agent-improvement" \
+  --apply
+```
+
+`--apply` retires stale, negative-feedback, or excess cards but does not
+delete their audit records. Export or compact with an archive, and use
+`forget` only for explicitly named cards:
+
+```bash
+codex debug agent-improvement evolve export \
+  --store "$CODEX_HOME/agent-improvement" \
+  --output /tmp/cards.jsonl
+
+codex debug agent-improvement evolve forget \
+  --store "$CODEX_HOME/agent-improvement" \
+  --archive /tmp/cards-before-forget.jsonl \
+  card_<ID>
+```
+
+The slow loop proposes experiments; it does not accept proposals, promote
+cards, edit Skills, modify `AGENTS.md`, change configuration, or grant
+permissions. Held-out improvement evidence and the Milestone 6 human review
+workflow remain required.
+
 ## Review card adoption
 
 When a selected card is shown to the model, Codex records a bounded exposure

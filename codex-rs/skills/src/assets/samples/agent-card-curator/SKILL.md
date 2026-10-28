@@ -82,6 +82,25 @@ candidates.
        codex debug agent-improvement proposals rollback <PROPOSAL.json> \
          --store <STORE> --actor <ACTOR>
 
+9. For periodic long-horizon review, run the Milestone 7 slow loop over the
+   bounded local store. It proposes inert experiment briefs; it does not call a
+   model, accept candidates, or promote cards:
+
+       codex debug agent-improvement evolve run \
+         --store <STORE> --output <BRIEFS.json>
+
+   Inspect recurring failure signatures, verification omissions, explicit
+   not-followed attribution, conflicts, coverage gaps, held-out metrics, and
+   provenance. After a separate evaluation, record its outcome:
+
+       codex debug agent-improvement evolve record \
+         --store <STORE> <BRIEF_ID> \
+         --fingerprint <FINGERPRINT> --outcome <OUTCOME> --actor <ACTOR>
+
+   Use `evolve maintain` to plan stale/negative/retention cleanup. Only use
+   `--apply`, archive-backed compaction, export, or explicit `forget` when the
+   user has asked for that maintenance operation.
+
 ## Boundaries
 
 - Never accept a candidate silently or in bulk without explicit user approval.

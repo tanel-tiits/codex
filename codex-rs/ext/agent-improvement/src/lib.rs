@@ -8,6 +8,7 @@ mod candidate;
 mod candidates;
 mod capture;
 mod eval;
+mod evolve;
 mod extension;
 mod improvement;
 mod promotion;
@@ -31,6 +32,16 @@ pub use eval::{
     EvaluationSplit, EvaluationStatus, EvaluationTask, EvaluatorKind, EvaluatorResult,
     EvaluatorSpec, EvaluatorStatus, JudgeLabel, MetricDelta, VerificationCheck, evaluate_manifest,
     evaluate_manifest_at, load_evaluation_manifest, write_evaluation_result,
+};
+pub use evolve::{
+    CardMaintenancePlan, EVOLUTION_HISTORY_FILE_NAME, EVOLUTION_HISTORY_SCHEMA_VERSION,
+    EVOLUTION_SCHEMA_VERSION, EvolutionCandidateChange, EvolutionCandidateChangeKind,
+    EvolutionConfig, EvolutionEvaluationSelection, EvolutionEvaluationSet, EvolutionEvidence,
+    EvolutionHistoryEvent, EvolutionHypothesis, EvolutionMetric, EvolutionOutcome, EvolutionReport,
+    EvolutionSignalKind, EvolutionStagnation, ExperimentBrief, ExperimentBriefStatus,
+    apply_card_maintenance, build_evolution_report, compact_card_store, evolution_history_path,
+    evolve_root, export_card_store, forget_card_store, load_evolution_history,
+    plan_card_maintenance, record_evolution_outcome,
 };
 pub use extension::{AgentImprovementExtensionConfig, install};
 pub use improvement::{
@@ -59,8 +70,9 @@ pub use schema::{
     workspace_scope_key,
 };
 pub use store::{
-    ExperienceRetrievalContext, STORE_FILE_NAME, append_card, cards_path, load_cards,
-    record_card_exposure, record_card_feedback, record_card_outcome, render_cards, retire_card,
+    CardStoreRewriteReport, ExperienceRetrievalContext, STORE_FILE_NAME, append_card, cards_path,
+    compact_cards, export_cards, forget_cards, load_cards, record_card_exposure,
+    record_card_feedback, record_card_outcome, render_cards, retire_card, retire_cards,
     select_relevant, select_relevant_with_context,
 };
 pub use summarize::summarize_rollout;
@@ -82,3 +94,6 @@ mod summarize_tests;
 
 #[cfg(test)]
 mod extension_tests;
+
+#[cfg(test)]
+mod evolve_tests;
