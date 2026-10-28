@@ -13,7 +13,7 @@ use super::schema::{
 use super::store::{
     ExperienceRetrievalContext, append_card, cards_path, load_cards, record_card_exposure,
     record_card_feedback, record_card_outcome, render_cards, retire_card, select_relevant,
-    select_relevant_at, select_relevant_with_context,
+    select_relevant_at, select_relevant_at_with_min_score, select_relevant_with_context,
 };
 
 fn card(
@@ -239,7 +239,7 @@ fn schema_v1_cards_migrate_and_unknown_versions_are_skipped() {
     fs::create_dir_all(directory.path()).expect("create card directory");
     fs::write(
         cards_path(directory.path()),
-        format!("{}\n{}\n", legacy, unknown),
+        format!("{legacy}\n{unknown}\n"),
     )
     .expect("write migration fixture");
 
@@ -368,6 +368,39 @@ fn retrieval_filters_mismatched_workspaces_and_suppresses_conflicts() {
 }
 
 #[test]
+fn minimum_relevance_score_rejects_generic_unknown_scope_cards() {
+    let generic = card(
+        "trace-generic",
+        10,
+        TaskFamily::Coding,
+        FailureClass::Completed,
+        &["generic"],
+    );
+    let direct = card(
+        "trace-direct",
+        11,
+        TaskFamily::Coding,
+        FailureClass::IncompleteVerification,
+        &["verification"],
+    );
+    let context = ExperienceRetrievalContext {
+        task_family: Some(TaskFamily::Coding),
+        failure_class: Some(FailureClass::IncompleteVerification),
+        ..Default::default()
+    };
+
+    let selected = select_relevant_at_with_min_score(
+        &[generic, direct.clone()],
+        "fix verification failures",
+        &context,
+        8,
+        6,
+        1_000,
+    );
+    assert_eq!(selected, vec![direct]);
+}
+
+#[test]
 fn recency_and_recurrence_break_structured_ties_deterministically() {
     let mut recent = card(
         "trace-recent",
@@ -487,7 +520,7 @@ fn offline_retrieval_fixture_tracks_precision_irrelevance_order_and_budget() {
         toolchain_family: Some(ToolchainFamily::Rust),
         model_family: None,
     };
-    let fixture = vec![other_workspace, unrelated, relevant.clone()];
+    let fixture = vec![other_workspace, unrelated, relevant];
     let selected = select_relevant_at(
         &fixture,
         "run the parser tests with cargo",

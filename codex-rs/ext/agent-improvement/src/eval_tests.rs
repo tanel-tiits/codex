@@ -24,6 +24,7 @@ use super::EvaluationErrorCode;
 use super::EvaluationManifest;
 use super::EvaluationMemory;
 use super::EvaluationRepository;
+use super::EvaluationRetrievalEvidence;
 use super::EvaluationScenario;
 use super::EvaluationSplit;
 use super::EvaluationStatus;
@@ -86,6 +87,7 @@ fn manifest_for(
                     card_schema_version: 2,
                     card_store_path: None,
                 },
+                retrieval: EvaluationRetrievalEvidence::default(),
                 judge: None,
                 post_run: None,
             },
@@ -102,6 +104,7 @@ fn manifest_for(
                     card_schema_version: 2,
                     card_store_path: Some(card_store),
                 },
+                retrieval: EvaluationRetrievalEvidence::default(),
                 judge: None,
                 post_run: None,
             },
@@ -311,6 +314,8 @@ fn post_run_evaluator() -> EvaluatorSpec {
             check_id: "hidden-tests".to_string(),
             command_tokens: vec!["python3".to_string(), "hidden_tests.py".to_string()],
             expected_exit_code: 0,
+            preflight_command_tokens: None,
+            preflight_expected_exit_code: 0,
         }],
         require_all_checks: true,
     }
@@ -418,6 +423,8 @@ fn verification_evaluator_reports_failed_checks_and_cost_limits() -> Result<()> 
                 check_id: "tests".to_string(),
                 command_tokens: vec!["cargo".to_string(), "test".to_string()],
                 expected_exit_code: 0,
+                preflight_command_tokens: None,
+                preflight_expected_exit_code: 0,
             }],
             require_all_checks: true,
         },
@@ -464,6 +471,13 @@ fn post_run_evaluator_uses_private_evidence_and_separates_trace_status() -> Resu
     });
     manifest.scenarios[0].baseline.post_run = evidence.clone();
     manifest.scenarios[0].treatment.post_run = evidence;
+    manifest.scenarios[0].treatment.retrieval = EvaluationRetrievalEvidence {
+        selected_card_ids: vec![
+            "card-private-selection-b".to_string(),
+            "card-private-selection-a".to_string(),
+        ],
+        exposure_count: 3,
+    };
 
     let result = evaluate_manifest_at(&manifest, 123)?;
     let scenario = &result.scenarios[0];
@@ -482,10 +496,30 @@ fn post_run_evaluator_uses_private_evidence_and_separates_trace_status() -> Resu
     let metrics = scenario.treatment.metrics.as_ref().expect("metrics");
     assert_eq!(metrics.trace_status, TraceStatus::Completed);
     assert_eq!(metrics.policy_status, PolicyStatus::Clean);
+    assert_eq!(scenario.treatment.retrieval.selected_card_count, 2);
+    assert_eq!(scenario.treatment.retrieval.exposure_count, 3);
+    assert!(scenario.treatment.retrieval.selection_fingerprint.is_some());
+
+    let first_selection_fingerprint = scenario.treatment.retrieval.selection_fingerprint.clone();
+    let mut reordered_manifest = manifest.clone();
+    reordered_manifest.scenarios[0]
+        .treatment
+        .retrieval
+        .selected_card_ids
+        .reverse();
+    let reordered = evaluate_manifest_at(&reordered_manifest, 123)?;
+    assert_eq!(
+        reordered.scenarios[0]
+            .treatment
+            .retrieval
+            .selection_fingerprint,
+        first_selection_fingerprint
+    );
 
     let json = serde_json::to_string(&result)?;
     assert!(!json.contains("python3"));
     assert!(!json.contains("hidden_tests.py"));
+    assert!(!json.contains("card-private-selection"));
     Ok(())
 }
 
@@ -623,10 +657,18 @@ fn validation_rejects_non_memory_pair_differences_and_overlap() -> Result<()> {
         trace_outcome_evaluator(),
     );
 
+    manifest.scenarios[0].treatment.retrieval.selected_card_ids =
+        vec!["card-duplicate".to_string(), "card-duplicate".to_string()];
+    assert!(manifest.validate().is_err());
+    manifest.scenarios[0]
+        .treatment
+        .retrieval
+        .selected_card_ids
+        .clear();
+
     manifest.scenarios[0].treatment.policy_fingerprint = "different-policy".to_string();
     assert!(manifest.validate().is_err());
 
-    let mut manifest = manifest;
     manifest.scenarios[0].treatment.policy_fingerprint = "policy-fingerprint".to_string();
     manifest.scenarios[0].treatment.worktree = manifest.scenarios[0].baseline.worktree.clone();
     assert!(manifest.validate().is_err());

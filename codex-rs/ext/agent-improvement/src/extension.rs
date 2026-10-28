@@ -32,7 +32,7 @@ use crate::current_unix_ms;
 use crate::load_runtime_cards;
 use crate::record_card_exposure;
 use crate::render_cards;
-use crate::select_relevant_with_context;
+use crate::select_relevant_with_context_and_min_score;
 
 const EXPERIENCE_CONTEXT_KEY: &str = "agent_experience";
 const ADVISORY_CONTEXT_PREFIX: &str = "\
@@ -47,6 +47,7 @@ pub struct AgentImprovementExtensionConfig {
     pub root: PathBuf,
     pub max_cards: usize,
     pub max_context_tokens: usize,
+    pub min_relevance_score: usize,
     pub capture: AgentImprovementCaptureMode,
     pub max_candidates: usize,
 }
@@ -60,6 +61,7 @@ impl AgentImprovementExtensionConfig {
                 .unwrap_or_else(|| config.codex_home.join("agent-improvement").to_path_buf()),
             max_cards: config.agent_improvement.max_cards,
             max_context_tokens: config.agent_improvement.max_context_tokens,
+            min_relevance_score: config.agent_improvement.min_relevance_score,
             capture: config.agent_improvement.capture,
             max_candidates: config.agent_improvement.max_candidates,
         }
@@ -95,8 +97,13 @@ impl AgentImprovementExtension {
             }
         };
         let retrieval_context = ExperienceRetrievalContext::from_query(query, workspace_path);
-        let selected =
-            select_relevant_with_context(&cards, query, &retrieval_context, config.max_cards);
+        let selected = select_relevant_with_context_and_min_score(
+            &cards,
+            query,
+            &retrieval_context,
+            config.max_cards,
+            config.min_relevance_score,
+        );
         if selected.is_empty() {
             return Vec::new();
         }

@@ -264,7 +264,7 @@ fn evidence_validation_requires_real_ids_but_never_runs_checks() {
         .validate_against(&catalog)
         .expect("catalog contains every referenced ID");
 
-    let mut manual_only = candidate.clone();
+    let mut manual_only = candidate;
     manual_only.validation = vec![ImprovementValidationRequirement {
         check_id: "manual".to_string(),
         kind: ImprovementValidationKind::ManualReview,

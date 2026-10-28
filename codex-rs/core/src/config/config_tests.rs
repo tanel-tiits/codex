@@ -273,6 +273,7 @@ max_context_tokens = 9000
             enabled: Some(true),
             max_cards: Some(64),
             max_context_tokens: Some(9000),
+            min_relevance_score: None,
             capture: None,
             max_candidates: None,
         })
@@ -291,6 +292,7 @@ max_context_tokens = 9000
             enabled: true,
             max_cards: 64,
             max_context_tokens: 8_000,
+            min_relevance_score: 0,
             capture: AgentImprovementCaptureMode::Off,
             max_candidates: 64,
         }

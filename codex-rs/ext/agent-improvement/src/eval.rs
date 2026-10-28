@@ -36,9 +36,9 @@ use crate::TokenUsageSummary;
 use crate::summarize_rollout;
 
 /// Version of the local scenario manifest contract.
-pub const EVALUATION_MANIFEST_SCHEMA_VERSION: u32 = 1;
+pub const EVALUATION_MANIFEST_SCHEMA_VERSION: u32 = 2;
 /// Version of the aggregate result contract.
-pub const EVALUATION_RESULT_SCHEMA_VERSION: u32 = 2;
+pub const EVALUATION_RESULT_SCHEMA_VERSION: u32 = 3;
 
 const MAX_SCENARIOS: usize = 512;
 const MAX_CHECKS: usize = 16;
@@ -139,6 +139,9 @@ pub struct EvaluationCondition {
     pub execution_config_fingerprint: String,
     pub policy_fingerprint: String,
     pub memory: EvaluationMemory,
+    /// Private retrieval evidence; raw card IDs never enter the redacted result.
+    #[serde(default)]
+    pub retrieval: EvaluationRetrievalEvidence,
     #[serde(default)]
     pub judge: Option<JudgeLabel>,
     /// Private evidence produced by evaluator-side post-run checks.
@@ -167,6 +170,31 @@ pub struct VerificationCheck {
     pub command_tokens: Vec<String>,
     #[serde(default)]
     pub expected_exit_code: i32,
+    /// Optional evaluator self-check executed before any model run. Live
+    /// post-run plans must provide this to validate the check harness.
+    #[serde(default)]
+    pub preflight_command_tokens: Option<Vec<String>>,
+    #[serde(default)]
+    pub preflight_expected_exit_code: i32,
+}
+
+/// Private evidence captured by the live runner about card selection. IDs are
+/// retained only in the private manifest and are never written to results.
+#[derive(Debug, Clone, PartialEq, Eq, Default, Serialize, Deserialize)]
+pub struct EvaluationRetrievalEvidence {
+    #[serde(default)]
+    pub selected_card_ids: Vec<String>,
+    #[serde(default)]
+    pub exposure_count: u64,
+}
+
+/// Redacted retrieval evidence published alongside condition metrics.
+#[derive(Debug, Clone, PartialEq, Eq, Default, Serialize, Deserialize)]
+pub struct EvaluationRetrievalResult {
+    pub selected_card_count: u32,
+    pub exposure_count: u64,
+    #[serde(default)]
+    pub selection_fingerprint: Option<String>,
 }
 
 /// Results from evaluator-side commands executed after a child run exits.
@@ -435,6 +463,18 @@ fn validate_condition(condition: &EvaluationCondition, label: &str) -> Result<()
         &condition.memory.retrieval_policy_fingerprint,
         &format!("{label}.memory.retrieval_policy_fingerprint"),
     )?;
+    ensure!(
+        condition.retrieval.selected_card_ids.len() <= MAX_CHECKS * 4,
+        "{label}.retrieval contains too many selected cards"
+    );
+    let mut selected_card_ids = BTreeSet::new();
+    for card_id in &condition.retrieval.selected_card_ids {
+        ensure_id(card_id, &format!("{label}.retrieval.card_id"))?;
+        ensure!(
+            selected_card_ids.insert(card_id),
+            "{label}.retrieval contains duplicate card IDs"
+        );
+    }
     if let Some(judge) = &condition.judge {
         ensure_id(&judge.label_id, &format!("{label}.judge.label_id"))?;
         if let Some(score) = judge.score_bps {
@@ -469,20 +509,25 @@ pub(crate) fn validate_evaluator(evaluator: &EvaluatorSpec) -> Result<()> {
             "duplicate evaluator check {}",
             check.check_id
         );
-        ensure!(
-            !check.command_tokens.is_empty(),
-            "evaluator check has no command tokens"
-        );
-        ensure!(
-            check.command_tokens.len() <= 32,
-            "evaluator check contains too many command tokens"
-        );
-        for token in &check.command_tokens {
-            ensure!(
-                !token.trim().is_empty() && token.chars().count() <= MAX_COMMAND_TOKEN_CHARS,
-                "evaluator command token is empty or too long"
-            );
+        validate_command_tokens(&check.command_tokens, "evaluator check")?;
+        if let Some(tokens) = &check.preflight_command_tokens {
+            validate_command_tokens(tokens, "evaluator preflight check")?;
         }
+    }
+    Ok(())
+}
+
+fn validate_command_tokens(tokens: &[String], label: &str) -> Result<()> {
+    ensure!(!tokens.is_empty(), "{label} has no command tokens");
+    ensure!(
+        tokens.len() <= 32,
+        "{label} contains too many command tokens"
+    );
+    for token in tokens {
+        ensure!(
+            !token.trim().is_empty() && token.chars().count() <= MAX_COMMAND_TOKEN_CHARS,
+            "{label} command token is empty or too long"
+        );
     }
     Ok(())
 }
@@ -1104,6 +1149,8 @@ pub struct EvaluationMemoryProvenance {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct EvaluationConditionResult {
     pub provenance: EvaluationConditionProvenance,
+    #[serde(default)]
+    pub retrieval: EvaluationRetrievalResult,
     pub trace_id: Option<String>,
     pub status: EvaluationStatus,
     pub error_code: Option<EvaluationErrorCode>,
@@ -1113,6 +1160,8 @@ pub struct EvaluationConditionResult {
 
 impl EvaluationConditionResult {
     fn from_condition(condition: &EvaluationCondition, evaluated: EvaluatedCondition) -> Self {
+        let mut selected_card_ids = condition.retrieval.selected_card_ids.clone();
+        selected_card_ids.sort();
         Self {
             provenance: EvaluationConditionProvenance {
                 execution_config_fingerprint: condition.execution_config_fingerprint.clone(),
@@ -1127,6 +1176,20 @@ impl EvaluationConditionResult {
                         .clone(),
                     card_schema_version: condition.memory.card_schema_version,
                 },
+            },
+            retrieval: EvaluationRetrievalResult {
+                selected_card_count: condition
+                    .retrieval
+                    .selected_card_ids
+                    .len()
+                    .min(u32::MAX as usize) as u32,
+                exposure_count: condition.retrieval.exposure_count,
+                selection_fingerprint: (!selected_card_ids.is_empty()).then(|| {
+                    crate::fingerprint_descriptor(
+                        "retrieval-selection-v1",
+                        &selected_card_ids.join("\0"),
+                    )
+                }),
             },
             trace_id: evaluated.trace_id,
             status: evaluated.status,

@@ -28,6 +28,7 @@ fn config(root: &std::path::Path, enabled: bool) -> AgentImprovementExtensionCon
         root: root.to_path_buf(),
         max_cards: 8,
         max_context_tokens: 1_200,
+        min_relevance_score: 0,
         capture: AgentImprovementCaptureMode::Off,
         max_candidates: 8,
     }
@@ -39,6 +40,7 @@ fn capture_config(root: &std::path::Path) -> AgentImprovementExtensionConfig {
         root: root.to_path_buf(),
         max_cards: 8,
         max_context_tokens: 1_200,
+        min_relevance_score: 0,
         capture: AgentImprovementCaptureMode::Candidate,
         max_candidates: 8,
     }

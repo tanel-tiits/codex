@@ -16,6 +16,7 @@ use codex_agent_improvement_extension::EvaluationCondition;
 use codex_agent_improvement_extension::EvaluationManifest;
 use codex_agent_improvement_extension::EvaluationMemory;
 use codex_agent_improvement_extension::EvaluationRepository;
+use codex_agent_improvement_extension::EvaluationRetrievalEvidence;
 use codex_agent_improvement_extension::EvaluationScenario;
 use codex_agent_improvement_extension::EvaluatorKind;
 use codex_agent_improvement_extension::EvolutionConfig;
@@ -102,6 +103,8 @@ use codex_utils_absolute_path::AbsolutePathBuf;
 use codex_utils_cli::CliConfigOverrides;
 use codex_utils_cli::ProfileV2Name;
 use codex_utils_cli::SharedCliOptions;
+use std::collections::BTreeMap;
+use std::collections::BTreeSet;
 use std::collections::HashSet;
 use std::io::IsTerminal;
 use std::io::Write;
@@ -113,6 +116,8 @@ use std::thread;
 use std::time::Duration;
 use std::time::Instant;
 use supports_color::Stream;
+
+const MAX_LIVE_PREFLIGHT_TIME_MS: u64 = 60_000;
 
 #[cfg(all(
     target_os = "linux",
@@ -3245,6 +3250,27 @@ fn run_debug_agent_improvement_evaluate_command(
     std::fs::create_dir(&run_dir)
         .with_context(|| format!("create live evaluation run directory {}", run_dir.display()))?;
 
+    let selected_scenarios = plan
+        .scenarios
+        .iter()
+        .take(cmd.max_scenarios)
+        .collect::<Vec<_>>();
+    if selected_scenarios
+        .iter()
+        .any(|scenario| scenario.evaluator.kind == EvaluatorKind::PostRunVerification)
+    {
+        let preflight_worktree = run_dir.join("preflight-worktree");
+        create_git_worktree(&source_checkout, &preflight_worktree, &source_commit)?;
+        let preflight_result = run_preflight_checks(
+            &selected_scenarios,
+            &preflight_worktree,
+            MAX_LIVE_PREFLIGHT_TIME_MS,
+        );
+        let cleanup_result = remove_git_worktree(&source_checkout, &preflight_worktree);
+        preflight_result?;
+        cleanup_result?;
+    }
+
     let baseline_store = run_dir.join("baseline-state");
     let treatment_store = run_dir.join("treatment-state");
     std::fs::create_dir_all(&baseline_store)?;
@@ -3255,7 +3281,7 @@ fn run_debug_agent_improvement_evaluate_command(
     let baseline_card_set_fingerprint = fingerprint_card_set(&[]);
     let retrieval_policy_fingerprint = fingerprint_descriptor(
         "retrieval-policy-v1",
-        "max_cards=8;max_context_tokens=2000;workspace_override=source",
+        "max_cards=2;max_context_tokens=1200;min_relevance_score=6;workspace_override=source",
     );
     let policy_fingerprint = fingerprint_descriptor(
         "execution-policy-v1",
@@ -3269,9 +3295,9 @@ fn run_debug_agent_improvement_evaluate_command(
         ),
     );
 
-    let mut scenarios = Vec::with_capacity(plan.scenarios.len());
-    let mut worktrees = Vec::with_capacity(plan.scenarios.len() * 2);
-    for scenario in plan.scenarios.iter().take(cmd.max_scenarios) {
+    let mut scenarios = Vec::with_capacity(selected_scenarios.len());
+    let mut worktrees = Vec::with_capacity(selected_scenarios.len() * 2);
+    for scenario in selected_scenarios {
         let scenario_root = run_dir.join("scenarios").join(&scenario.scenario_id);
         let baseline_worktree = scenario_root.join("baseline-worktree");
         let treatment_worktree = scenario_root.join("treatment-worktree");
@@ -3295,7 +3321,7 @@ fn run_debug_agent_improvement_evaluate_command(
             false,
             cmd.model.as_deref(),
         )?;
-        let exposure_before = total_card_exposure(&treatment_store)?;
+        let exposure_before = card_exposure_snapshot(&treatment_store)?;
         let treatment_run = run_live_condition(
             &codex_bin,
             scenario,
@@ -3306,10 +3332,11 @@ fn run_debug_agent_improvement_evaluate_command(
             true,
             cmd.model.as_deref(),
         )?;
-        let exposure_after = total_card_exposure(&treatment_store)?;
+        let treatment_retrieval =
+            card_exposure_delta(&exposure_before, &card_exposure_snapshot(&treatment_store)?);
 
         let attribution = AttributionEvidence {
-            exposure: if exposure_after > exposure_before {
+            exposure: if treatment_retrieval.exposure_count > 0 {
                 AttributionState::Yes
             } else {
                 AttributionState::No
@@ -3336,6 +3363,7 @@ fn run_debug_agent_improvement_evaluate_command(
                 false,
                 &baseline_card_set_fingerprint,
                 None,
+                EvaluationRetrievalEvidence::default(),
                 baseline_run.post_run,
             ),
             treatment: live_condition(
@@ -3348,6 +3376,7 @@ fn run_debug_agent_improvement_evaluate_command(
                 true,
                 &treatment_card_set_fingerprint,
                 Some(treatment_store.clone()),
+                treatment_retrieval,
                 treatment_run.post_run,
             ),
             evaluator: scenario.evaluator.clone(),
@@ -3461,6 +3490,7 @@ fn live_condition(
     enabled: bool,
     card_set_fingerprint: &str,
     card_store_path: Option<PathBuf>,
+    retrieval: EvaluationRetrievalEvidence,
     post_run: Option<PostRunEvidence>,
 ) -> EvaluationCondition {
     EvaluationCondition {
@@ -3476,6 +3506,7 @@ fn live_condition(
             card_schema_version: EXPERIENCE_CARD_SCHEMA_VERSION,
             card_store_path,
         },
+        retrieval,
         judge: None,
         post_run,
     }
@@ -3484,6 +3515,47 @@ fn live_condition(
 struct LiveConditionRun {
     trace_bundle: PathBuf,
     post_run: Option<PostRunEvidence>,
+}
+
+/// Validate evaluator-owned self-checks before launching any model process.
+/// The commands are private argv vectors, run without a shell, and share one
+/// bounded deadline for the selected live plan.
+fn run_preflight_checks(
+    scenarios: &[&LiveEvaluationScenario],
+    worktree: &std::path::Path,
+    max_time_ms: u64,
+) -> anyhow::Result<()> {
+    let deadline = Instant::now() + Duration::from_millis(max_time_ms);
+    let mut seen = BTreeSet::<(Vec<String>, i32)>::new();
+    for scenario in scenarios {
+        if scenario.evaluator.kind != EvaluatorKind::PostRunVerification {
+            continue;
+        }
+        for check in &scenario.evaluator.checks {
+            let tokens = check.preflight_command_tokens.as_ref().ok_or_else(|| {
+                anyhow::anyhow!(
+                    "live post-run check {} has no preflight command",
+                    check.check_id
+                )
+            })?;
+            let key = (tokens.clone(), check.preflight_expected_exit_code);
+            if !seen.insert(key) {
+                continue;
+            }
+            anyhow::ensure!(
+                run_bounded_argv_check(
+                    tokens,
+                    check.preflight_expected_exit_code,
+                    worktree,
+                    deadline,
+                ),
+                "evaluator preflight failed for scenario {} check {}",
+                scenario.scenario_id,
+                check.check_id
+            );
+        }
+    }
+    Ok(())
 }
 
 fn run_live_condition(
@@ -3511,9 +3583,11 @@ fn run_live_condition(
         .arg("-c")
         .arg("agent_improvement.capture=\"off\"")
         .arg("-c")
-        .arg("agent_improvement.max_cards=8")
+        .arg("agent_improvement.max_cards=2")
         .arg("-c")
-        .arg("agent_improvement.max_context_tokens=2000")
+        .arg("agent_improvement.max_context_tokens=1200")
+        .arg("-c")
+        .arg("agent_improvement.min_relevance_score=6")
         .arg("exec")
         .arg("--json")
         .arg("--ephemeral")
@@ -3577,7 +3651,21 @@ fn run_post_run_check(
     worktree: &std::path::Path,
     deadline: Instant,
 ) -> bool {
-    let Some((program, arguments)) = check.command_tokens.split_first() else {
+    run_bounded_argv_check(
+        &check.command_tokens,
+        check.expected_exit_code,
+        worktree,
+        deadline,
+    )
+}
+
+fn run_bounded_argv_check(
+    command_tokens: &[String],
+    expected_exit_code: i32,
+    worktree: &std::path::Path,
+    deadline: Instant,
+) -> bool {
+    let Some((program, arguments)) = command_tokens.split_first() else {
         return false;
     };
     let remaining = deadline.saturating_duration_since(Instant::now());
@@ -3605,7 +3693,7 @@ fn run_post_run_check(
         .ok()
         .flatten()
         .and_then(|status| status.code())
-        == Some(check.expected_exit_code)
+        == Some(expected_exit_code)
 }
 
 fn wait_for_live_condition(
@@ -3658,11 +3746,30 @@ fn copy_card_store(
     Ok(())
 }
 
-fn total_card_exposure(root: &std::path::Path) -> anyhow::Result<u64> {
+fn card_exposure_snapshot(root: &std::path::Path) -> anyhow::Result<BTreeMap<String, u32>> {
     Ok(load_cards(root)?
         .into_iter()
-        .map(|card| u64::from(card.adoption.exposure_count))
-        .sum())
+        .map(|card| (card.card_id, card.adoption.exposure_count))
+        .collect())
+}
+
+fn card_exposure_delta(
+    before: &BTreeMap<String, u32>,
+    after: &BTreeMap<String, u32>,
+) -> EvaluationRetrievalEvidence {
+    let mut selected_card_ids = Vec::new();
+    let mut exposure_count = 0u64;
+    for (card_id, after_count) in after {
+        let before_count = before.get(card_id).copied().unwrap_or_default();
+        if *after_count > before_count {
+            selected_card_ids.push(card_id.clone());
+            exposure_count = exposure_count.saturating_add(u64::from(*after_count - before_count));
+        }
+    }
+    EvaluationRetrievalEvidence {
+        selected_card_ids,
+        exposure_count,
+    }
 }
 
 fn git_head(checkout: &std::path::Path) -> anyhow::Result<String> {
@@ -7242,16 +7349,22 @@ enabled = true
                 check_id: "argv".to_string(),
                 command_tokens: vec!["true".to_string(), ";".to_string(), "false".to_string()],
                 expected_exit_code: 0,
+                preflight_command_tokens: None,
+                preflight_expected_exit_code: 0,
             },
             VerificationCheck {
                 check_id: "failure".to_string(),
                 command_tokens: vec!["false".to_string()],
                 expected_exit_code: 0,
+                preflight_command_tokens: None,
+                preflight_expected_exit_code: 0,
             },
             VerificationCheck {
                 check_id: "timeout".to_string(),
                 command_tokens: vec!["sleep".to_string(), "1".to_string()],
                 expected_exit_code: 0,
+                preflight_command_tokens: None,
+                preflight_expected_exit_code: 0,
             },
         ];
 
@@ -7266,6 +7379,67 @@ enabled = true
         assert!(
             !evidence.checks[2].success,
             "long checks must be time bounded"
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn evaluator_preflight_must_pass_before_a_live_run() {
+        fn scenario(preflight: &str) -> LiveEvaluationScenario {
+            LiveEvaluationScenario {
+                scenario_id: "preflight-scenario".to_string(),
+                task_family: codex_agent_improvement_extension::TaskFamily::Coding,
+                split: codex_agent_improvement_extension::EvaluationSplit::HeldOut,
+                task: codex_agent_improvement_extension::EvaluationTask {
+                    task_id: "preflight-task".to_string(),
+                    prompt: Some("run the fixture".to_string()),
+                    reference: None,
+                    fingerprint: "preflight-task-fingerprint".to_string(),
+                },
+                evaluator: codex_agent_improvement_extension::EvaluatorSpec {
+                    kind: EvaluatorKind::PostRunVerification,
+                    checks: vec![VerificationCheck {
+                        check_id: "fixture-self-test".to_string(),
+                        command_tokens: vec!["true".to_string()],
+                        expected_exit_code: 0,
+                        preflight_command_tokens: Some(vec![preflight.to_string()]),
+                        preflight_expected_exit_code: 0,
+                    }],
+                    require_all_checks: true,
+                },
+                budget: codex_agent_improvement_extension::EvaluationBudget::default(),
+            }
+        }
+
+        let worktree = tempfile::tempdir().expect("temporary worktree");
+        let passing = scenario("true");
+        let passing_scenarios = vec![&passing];
+        run_preflight_checks(&passing_scenarios, worktree.path(), 1_000)
+            .expect("passing evaluator preflight");
+
+        let failing = scenario("false");
+        let failing_scenarios = vec![&failing];
+        assert!(run_preflight_checks(&failing_scenarios, worktree.path(), 1_000).is_err());
+    }
+
+    #[test]
+    fn card_exposure_delta_records_only_new_exposure() {
+        let before = BTreeMap::from([
+            ("card-kept".to_string(), 2),
+            ("card-decreased".to_string(), 4),
+        ]);
+        let after = BTreeMap::from([
+            ("card-kept".to_string(), 3),
+            ("card-decreased".to_string(), 1),
+            ("card-new".to_string(), 2),
+        ]);
+
+        assert_eq!(
+            card_exposure_delta(&before, &after),
+            EvaluationRetrievalEvidence {
+                selected_card_ids: vec!["card-kept".to_string(), "card-new".to_string()],
+                exposure_count: 3,
+            }
         );
     }
 }

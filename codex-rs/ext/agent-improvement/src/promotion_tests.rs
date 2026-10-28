@@ -14,6 +14,7 @@ use crate::EvaluationConditionProvenance;
 use crate::EvaluationConditionResult;
 use crate::EvaluationMemoryProvenance;
 use crate::EvaluationResult;
+use crate::EvaluationRetrievalResult;
 use crate::EvaluationScenarioResult;
 use crate::EvaluationSplit;
 use crate::EvaluationStatus;
@@ -99,6 +100,7 @@ fn condition(enabled: bool, task_success: bool, trace_id: &str) -> EvaluationCon
                 card_schema_version: EXPERIENCE_CARD_SCHEMA_VERSION,
             },
         },
+        retrieval: EvaluationRetrievalResult::default(),
         trace_id: Some(trace_id.to_string()),
         status: EvaluationStatus::Evaluated,
         error_code: None,

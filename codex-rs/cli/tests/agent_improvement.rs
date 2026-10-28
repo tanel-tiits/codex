@@ -16,6 +16,8 @@ use codex_agent_improvement_extension::EvaluationMemory;
 use codex_agent_improvement_extension::EvaluationMemoryProvenance;
 use codex_agent_improvement_extension::EvaluationRepository;
 use codex_agent_improvement_extension::EvaluationResult;
+use codex_agent_improvement_extension::EvaluationRetrievalEvidence;
+use codex_agent_improvement_extension::EvaluationRetrievalResult;
 use codex_agent_improvement_extension::EvaluationScenario;
 use codex_agent_improvement_extension::EvaluationScenarioResult;
 use codex_agent_improvement_extension::EvaluationSplit;
@@ -109,6 +111,7 @@ fn promotion_result(evaluated_at_unix_ms: i64) -> EvaluationResult {
                 card_schema_version: 2,
             },
         },
+        retrieval: EvaluationRetrievalResult::default(),
         trace_id: Some(trace_id.to_string()),
         status: EvaluationStatus::Evaluated,
         error_code: None,
@@ -276,6 +279,7 @@ fn eval_command_writes_redacted_paired_results() -> Result<()> {
                 card_schema_version: 2,
                 card_store_path,
             },
+            retrieval: EvaluationRetrievalEvidence::default(),
             judge: None,
             post_run: None,
         }
@@ -1110,6 +1114,8 @@ fn evolve_evaluate_dry_run_validates_a_private_held_out_plan() -> Result<()> {
                         check_id: "hidden-tests".to_string(),
                         command_tokens: vec!["python3".to_string(), "private_tests.py".to_string()],
                         expected_exit_code: 0,
+                        preflight_command_tokens: Some(vec!["true".to_string()]),
+                        preflight_expected_exit_code: 0,
                     }],
                     require_all_checks: true,
                 },

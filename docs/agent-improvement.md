@@ -20,6 +20,7 @@ Add this to the effective Codex configuration:
 enabled = true
 max_cards = 8
 max_context_tokens = 1200
+min_relevance_score = 0
 capture = "off"
 max_candidates = 64
 ```
@@ -33,9 +34,11 @@ $CODEX_HOME/agent-improvement/cards.jsonl
 Codex reads that file at turn preparation time and selects active cards with
 deterministic structured matches (workspace, task family, failure class, tool
 and toolchain family) plus evidence quality, confidence, recurrence, recency,
-and bounded lexical/topic overlap. A mismatched opaque workspace is filtered;
-unknown scope remains a fallback. Missing stores, malformed lines, oversized
-cards, and read failures are ignored with a bounded warning.
+and bounded lexical/topic overlap. `min_relevance_score` can add a bounded
+relevance floor after those matches; zero preserves the normal broad retrieval
+behavior. A mismatched opaque workspace is filtered; unknown scope remains a
+fallback. Missing stores, malformed lines, oversized cards, and read failures
+are ignored with a bounded warning.
 
 Cards use schema version 2. Each card contains a bounded observed sequence
 (`turn`, `inference`, `tool`, `terminal_operation`, verification, policy, or
@@ -338,7 +341,7 @@ paths. Its essential shape is:
 
 ```json
 {
-  "schema_version": 1,
+  "schema_version": 2,
   "plan_id": "parser-held-out-v1",
   "brief_id": "experiment_<ID>",
   "brief_fingerprint": "sha256:<brief fingerprint>",
@@ -359,7 +362,9 @@ paths. Its essential shape is:
           {
             "check_id": "hidden-contract",
             "command_tokens": ["python3", "private_hidden_tests.py"],
-            "expected_exit_code": 0
+            "expected_exit_code": 0,
+            "preflight_command_tokens": ["python3", "private_hidden_tests.py", "--preflight"],
+            "preflight_expected_exit_code": 0
           }
         ],
         "require_all_checks": true
@@ -380,6 +385,14 @@ paths. Its essential shape is:
 The plan must have at least the number of scenarios requested by the brief,
 and every scenario must be held out, use the same task family, and contain a
 prompt. The source checkout must be clean for a real run. Use a dry run first:
+
+For a live `post_run_verification` plan, every check must include a
+`preflight_command_tokens` argv. Codex runs each distinct preflight once in a
+detached source worktree before launching any model. The preflight must test
+the evaluator fixture itself (for example, a private test command's
+`--preflight` mode); a failing or timing-out preflight aborts the entire run.
+Preflight and post-run commands are executed without a shell, with output
+discarded, a scrubbed environment, and bounded time.
 
 ```bash
 codex debug agent-improvement evolve evaluate experiment_<ID> \
@@ -463,7 +476,7 @@ scenario has this shape:
 
 ~~~json
 {
-  "schema_version": 1,
+  "schema_version": 2,
   "manifest_id": "parser-held-out-v1",
   "scenarios": [
     {
@@ -547,7 +560,9 @@ codex debug agent-improvement eval \
 Results contain scenario IDs, opaque provenance fingerprints, evaluator
 outcomes, check results, trace/policy status, failure classes, retries, tool
 and terminal counts, tokens, wall time, cancellation, policy events, held-out
-aggregates, and per-task-family aggregates. They do not contain prompts,
+aggregates, and per-task-family aggregates. For live treatment conditions they
+also contain a selected-card count, exposure count, and opaque selection
+fingerprint; they never contain raw card IDs. They do not contain prompts,
 command tokens, local paths, or judge evidence references. Missing traces,
 evaluator failures, and cost-limit interruptions remain explicit partial
 results rather than being converted to zeroes. Treat

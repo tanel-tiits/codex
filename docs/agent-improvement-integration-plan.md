@@ -1,8 +1,8 @@
 # Agent Improvement Integration Plan
 
-Status: Milestone 8a.1 independent evaluation and observability hardening
-complete; Milestones 1–7 and 8a complete; full program-level evolution and
-transfer remain gated
+Status: Milestone 8a.2 evaluator and retrieval hardening complete; Milestones
+1–7 and 8a–8a.2 complete; the practical-value track (8a.3–8a.7) and full
+program-level evolution remain gated
 
 Latest live study: [Milestone 8a.1 pilot report](agent-improvement-pilot-8a1.md).
 It found no task-success lift in the first corrected 8-task study, so Milestone
@@ -96,11 +96,19 @@ intentionally lands as an offline replay/evaluation core: it consumes matched
 artifacts produced by separately controlled baseline and treatment runs.
 Milestone 8a adds an explicitly manual bridge that can produce those artifacts
 in isolated worktrees, while Milestone 8a.1 makes the live outcome measurable
-without conflating policy diagnostics with coding success. Neither promotes a
-result or changes live Codex behavior. The remaining milestones are ordered by
-the dependency that makes each new form of autonomy safe and measurable. A
-milestone is not considered complete merely because its code exists; its exit
-gate and regression evidence must also be satisfied.
+without conflating policy diagnostics with coding success. Milestone 8a.2
+hardens the evaluator contract and makes retrieval exposure observable without
+leaking card identity into published results. The first pilot still found no
+task-success lift, so 8a.2 is treated as measurement and retrieval
+infrastructure, not as evidence that the agent improved. Milestones 8a.3–8a.7
+are a practical-value track: qualify a harder benchmark, turn broad advisory
+cards into scoped interventions, measure whether an intervention was
+attempted, and repeat the study before allowing a canary. None of these
+milestones promotes a result or changes normal Codex behavior by default. The
+remaining milestones are ordered by the dependency that makes each new form
+of autonomy safe and measurable. A milestone is not considered complete merely
+because its code exists; its exit gate and regression evidence must also be
+satisfied.
 
 | Milestone | Outcome | Priority | Depends on | Status |
 | --- | --- | --- | --- | --- |
@@ -113,7 +121,13 @@ gate and regression evidence must also be satisfied.
 | 7. Slow loop for long-horizon improvement | Periodic analysis finds recurring patterns, stale knowledge, and missed evidence, then proposes the next experiments | High value / research | 4–6 | Complete; deterministic/manual loop |
 | 8a. Bounded live evaluation and feedback bridge | Run a private held-out brief in paired isolated worktrees, produce a redacted result, and optionally record one explicit outcome | Essential before optional autonomy | 4–7 | Complete; opt-in/manual; no automatic promotion |
 | 8a.1. Independent evaluation and observability hardening | Execute bounded evaluator-side checks before cleanup and separate coding outcome from trace and policy diagnostics | Essential before Milestone 8 | 8a | Complete; opt-in/manual; no automatic promotion |
-| 8. Optional program-level evolution and transfer | Isolated evolution of skills, prompts, or extension policy can be explored across task families without mutating the live agent | Research only | 6–7 + 8a.1 | Planned |
+| 8a.2. Evaluator and retrieval hardening | Preflight evaluator contracts, bounded live retrieval, and separate selection/exposure evidence make the next pilot trustworthy | Essential before Milestone 8 | 8a.1 | Complete; opt-in/manual; no automatic promotion |
+| 8a.3. Benchmark and evaluator qualification | A realistic, non-ceiling task pack and adversarial evaluator fixtures make behavioral claims trustworthy | Essential | 8a.2 | Planned |
+| 8a.4. Intervention cards and scoped retrieval | Cards contain a trigger, one bounded action, a verification target, and explicit scope; retrieval is task-local and low-noise | High value | 8a.3 | Planned |
+| 8a.5. Causal exposure and action telemetry | Private evidence distinguishes card selection, injection, attempted action, verification, and outcome without claiming causation from exposure | Essential | 8a.4 | Planned |
+| 8a.6. Repeated practical-value pilot | A preregistered 32–48-task study tests correctness, recovery, cost, and negative transfer across repeated trials | Essential decision gate | 8a.3–8a.5 | Planned |
+| 8a.7. Scoped canary and operating loop | A passing intervention can be manually activated for a narrow scope with TTL, monitoring, and rollback | Conditional high value | 8a.6 | Planned; only if 8a.6 passes |
+| 8. Optional program-level evolution and transfer | Isolated evolution of skills, prompts, or extension policy can be explored across task families without mutating the live agent | Research only | 8a.6–8a.7 | Planned; do not start before practical-value gates |
 
 ### Milestone 1 — Safe local experience foundation (complete)
 
@@ -679,6 +693,321 @@ evidence, and report coding success, trace completion, and policy events as
 separate signals. Milestone 8 remains gated on repeated studies using this
 stronger evaluator.
 
+### Milestone 8a.2 — Evaluator and retrieval hardening
+
+**Implementation status: complete; opt-in/manual and no automatic promotion.**
+
+The first corrected 8-task pilot exposed three measurement defects in the
+operator harness: several private checks were themselves invalid, card
+exposure was inferred from aggregate store deltas, and the live treatment used
+a broad retrieval budget without recording which cards were actually selected.
+Milestone 8a.2 is the focused hardening increment before another live pilot.
+
+**Implementation plan and deliverables:**
+
+1. **Make evaluator plans self-validating.** Bump the private live-plan
+   contract and add an optional preflight argv to each verification check.
+   Live post-run plans must provide that preflight. Before any model process is
+   launched, the runner executes each distinct preflight once in a detached
+   source worktree. Commands use argv vectors, no shell, disconnected
+   standard streams, a scrubbed environment, and a shared 60-second bound.
+   A failing or timing-out preflight aborts the run before it can produce
+   outcome data.
+2. **Separate retrieval selection from outcome evidence.** Record the card IDs
+   whose exposure counters increase during each treatment task and the exact
+   exposure increment in the private manifest. Publish only the selected-card
+   count, exposure count, and an opaque order-independent fingerprint in the
+   redacted result. This prevents “card was available” or “card was exposed”
+   from being mistaken for “the agent followed the recommendation.”
+3. **Reduce live treatment confounding.** Add a bounded, configurable
+   relevance floor. Normal retrieval keeps the backward-compatible default of
+   zero; the live bridge uses two cards, a 1,200-token context budget, and a
+   minimum relevance score of six. The policy fingerprint records these values
+   so future results cannot be compared as if they used the old policy.
+4. **Cover the contracts with regression tests and documentation.** Test
+   preflight rejection and success, argv/no-shell behavior, timeout behavior,
+   retrieval relevance filtering, exposure deltas, result redaction, config
+   clamping, and schema-versioned plan/result serialization. Update the
+   operator documentation with the new private-plan fields and the next-pilot
+   procedure.
+
+**Exit gate:** complete for implementation and regression coverage. The next
+   pilot must still demonstrate that the hardened checks pass on every task,
+   that treatment exposure is measurable, and that any task-success or
+   verification improvement survives a larger held-out study. No card or
+   program-level change is promoted by this milestone.
+
+### Practical-value track after Milestone 8a.2
+
+The current implementation is a trustworthy substrate, not yet a demonstrated
+agent improvement. The next hypothesis is narrower and more testable:
+
+> A small, task-local intervention card that describes one recurring failure,
+> one bounded next action, and one verification target can improve recovery or
+> verification quality on difficult coding tasks without adding harmful
+> context or causing negative transfer.
+
+This hypothesis is deliberately about a failure/recovery slice of Codex's
+work, not generic intelligence. The track below must falsify the hypothesis if
+the card is merely extra prompt text. The existing broad advisory cards remain
+useful as diagnostic history, but they must not be treated as proven treatment
+material in the next study.
+
+### Milestone 8a.3 — Benchmark and evaluator qualification
+
+**Implementation status: planned; no behavioral claim is allowed before this
+milestone passes.**
+
+The first pilot was too close to a ceiling and its private checks contained
+three defects. This milestone makes the task pack and evaluator a testable
+measurement instrument before another treatment run is attempted.
+
+**Implementation changes:**
+
+1. Create a versioned local/private benchmark manifest with 32–48 coding tasks
+   across at least four families, such as parsing/escaping, stateful behavior,
+   configuration and CLI contracts, test/debugging recovery, and repository
+   integration. Keep the task prompt, seed commit, expected contract, and
+   evaluator definition separate. Evaluator commands and reference solutions
+   must never be included in the model-visible task context.
+2. Give every task a difficulty and failure-motif label, but do not use those
+   labels as treatment context. Calibrate the pack with retrieval disabled so
+   a fresh baseline succeeds on roughly 40–75% of tasks. A pack with a success
+   rate above 85% is a ceiling test; a pack below 25% is not a useful memory
+   test and must be repaired before proceeding.
+3. Add evaluator qualification fixtures for every task family: a known-good
+   worktree, a no-op or incomplete worktree, and targeted mutants that violate
+   the contract. The private preflight must pass on the good fixture and the
+   relevant checks must fail on each bad fixture. Include cases for false
+   positives, missing checks, ordering/escaping mistakes, and unrelated
+   changes.
+4. Add a manifest validation/report command that checks task uniqueness,
+   source-commit consistency, worktree disjointness, evaluator preflight
+   coverage, budget bounds, and absence of model-visible expected answers.
+   Record an evaluator version/fingerprint in every live result.
+5. Add a small harness smoke run, using fresh worktrees and no cards, that
+   exercises every evaluator before spending model budget on the full pilot.
+
+**Tests and verification:**
+
+- unit tests for manifest bounds, family coverage, duplicate-task rejection,
+  evaluator-version matching, and prompt/evaluator separation;
+- fixture tests proving every good implementation passes and every targeted
+  mutant fails the intended check;
+- preflight tests proving a failing, timing-out, or malformed check prevents
+  model execution;
+- a baseline calibration report with task-level and family-level success,
+  verification completeness, and cost distributions;
+- a review of the task pack by a person who did not write the evaluator.
+
+**Exit gate:** all preflights pass on the good fixtures, all targeted mutants
+are detected, no task or evaluator leaks private expected answers, and the
+retrieval-disabled baseline is neither a ceiling nor a universal failure. If
+the gate fails, repair the benchmark; do not tune cards against invalid
+measurements.
+
+### Milestone 8a.4 — Intervention cards and task-local retrieval
+
+**Implementation status: planned; the existing broad-card path remains
+opt-in and is not a proven treatment.**
+
+This milestone changes the unit of memory from a general historical paragraph
+to a bounded intervention that a model can recognize and verify. It should
+reduce prompt noise before attempting to increase card sophistication.
+
+**Implementation changes:**
+
+1. Add a versioned intervention representation, while keeping old cards
+   readable as legacy advisory history. An intervention contains bounded
+   `trigger`, `scope`, `action`, `verification`, and `evidence` fields. The
+   trigger identifies a failure/task motif; the action contains one or two
+   imperative steps; verification identifies the expected check or outcome;
+   evidence records provenance and prior observed outcomes. No field may
+   contain raw prompts, responses, terminal output, secrets, or unrestricted
+   paths.
+2. Make scope explicit and ranked: exact workspace/project scope first, then
+   task family and failure signature, then a deliberately small generic
+   fallback. Unknown-scope generic cards must not outrank a scoped card. Cards
+   without a useful trigger or verification target remain diagnostic and are
+   excluded from the intervention pilot.
+3. Add a task-local retrieval path that can use the current task family and a
+   reduced current failure signal, in addition to the user query. Retrieval
+   must remain deterministic and model-free. At the start of a task and after
+   a matching failure, inject at most one intervention once per trigger; do
+   not repeat the same card on every turn.
+4. Render a compact intervention block targeted at 300–600 tokens, with the
+   card clearly marked as historical, advisory, and untrusted. The pilot
+   treatment uses one card unless a preregistered experiment explicitly tests
+   another budget. Cards can suggest a command or check but cannot invoke a
+   tool, grant permission, or override repository instructions.
+5. Keep a legacy/broad-retrieval mode for comparison and migration, but make
+   the policy fingerprint distinguish legacy retrieval, scoped intervention
+   retrieval, card count, context budget, and relevance floor.
+
+**Tests and verification:**
+
+- schema migration and bounded-field tests for intervention cards;
+- exact-scope, family-scope, failure-signature, generic-fallback, and
+  conflict-resolution retrieval fixtures;
+- negative-transfer fixtures proving an unrelated task does not receive a
+  scoped intervention;
+- injection-frequency tests proving one card is not repeated across turns or
+  after an unrelated failure;
+- context-budget and redaction tests for the 300–600-token rendering target;
+- disabled-mode and legacy-card compatibility tests;
+- an offline precision/coverage report comparing broad retrieval with the
+  scoped policy before any live run.
+
+**Exit gate:** on the qualified benchmark, scoped retrieval materially reduces
+irrelevant card exposure and context cost while preserving relevant-card
+recall. The intervention lane is deterministic, bounded, and incapable of
+changing permissions or instruction precedence. No live treatment is run if
+the scoped policy still presents generic cards on unrelated tasks.
+
+### Milestone 8a.5 — Causal exposure and action telemetry
+
+**Implementation status: planned; attribution remains unknown until this
+milestone is complete.**
+
+Exposure alone cannot explain an outcome. This milestone records the smallest
+private event chain needed to distinguish a card being available from an agent
+attempting the recommended action and passing the independent check.
+
+**Implementation changes:**
+
+1. Add an opaque per-task intervention context containing the experiment ID,
+   task ID, card fingerprint, trigger ID, and injection count. Keep raw card
+   IDs and card text in the private manifest only; aggregate/public results
+   contain counts or opaque fingerprints.
+2. Record separate events for `selected`, `injected`, `action_attempted`,
+   `agent_verification_attempted`, `independent_verification_passed`, and
+   `outcome`. An action is marked attempted only when a structured action
+   signature matches a bounded tool/terminal event or an explicit review
+   annotation. If evidence is absent, record `unknown`, never `not followed`.
+3. Link independent post-run checks to the same task condition and preserve
+   the distinction between agent verification and evaluator verification.
+   Derive recovery-after-failure and verification-completeness metrics without
+   claiming that a card caused an outcome merely because it was selected.
+4. Add redacted result fields for selected-card count, injection count,
+   action-attempt count, verification-attempt count, and outcome count. Keep
+   per-card attribution, raw event order, and diagnostic evidence private.
+
+**Tests and verification:**
+
+- synthetic event-sequence tests for exposure-only, action-attempted,
+  verification-passed, failed-recovery, and unknown-attribution cases;
+- duplicate-injection and baseline-no-exposure tests;
+- deterministic action-signature matching tests with false-match rejection;
+- redaction tests proving prompts, command tokens, paths, and raw card IDs do
+  not enter published results;
+- cost-limited and interrupted-run tests proving partial telemetry remains
+  explicit rather than being interpreted as failure or success.
+
+**Exit gate:** the harness can demonstrate, using synthetic and held-out
+fixtures, the difference between “shown,” “attempted,” “verified,” and
+“successful.” It must still report unknown when the trace cannot support a
+stronger claim. This is an observability gate, not a behavioral improvement
+claim.
+
+### Milestone 8a.6 — Repeated practical-value pilot
+
+**Implementation status: planned; this is the primary decision gate for
+whether the project adds value over baseline Codex.**
+
+Run the experiment only after 8a.3–8a.5 pass. Do not repeat the original
+8-task pilot with the same easy task distribution and broad cards.
+
+**Experiment design:**
+
+- Use 32–48 held-out tasks from 4–6 families, with the calibrated baseline
+  range from 8a.3. Include recurring failure motifs for which the intervention
+  cards have a plausible trigger/action/verification chain, plus unrelated
+  tasks that test negative transfer.
+- Use a reviewed pool of 6–12 scoped interventions. Each treatment task may
+  receive at most one 300–600-token intervention unless the manifest says
+  otherwise. Baseline receives no active cards but uses the same model,
+  repository commit, budgets, permissions, prompt, and evaluator.
+- Run fresh isolated worktrees and fresh child processes for every condition.
+  Randomize or counterbalance baseline/treatment order, task order, and trial
+  assignment. Run at least two independent trials per task for a promotion
+  decision; one trial is a harness smoke test only.
+- Freeze the task pack, card pool, policy fingerprint, primary endpoint,
+  exclusion rules, and analysis method before launching model runs. The
+  private plan must record model/configuration identity, source commit,
+  evaluator fingerprint, card-policy fingerprint, and trial ID.
+
+**Primary and secondary measures:**
+
+- primary: independently verified task correctness, chosen before the run;
+- secondary: verification completeness, recovery after an induced or observed
+  failure, failed verification attempts, unnecessary retries, tool/terminal
+  operations, input/context tokens, output/reasoning tokens, wall time,
+  cancellation, policy events, and negative transfer on unrelated tasks;
+- attribution: selected, injected, attempted, and verified counts from 8a.5;
+- report paired task-level deltas and family-level deltas. Raw attempt counts
+  are diagnostic only; more attempts are not an improvement by themselves.
+
+**Pre-registered decision rule:**
+
+1. Validity must pass first: every evaluator preflight succeeds, no leakage or
+   worktree overlap is found, and the baseline remains in the calibrated
+   difficulty range.
+2. A treatment claim requires a practically meaningful primary improvement,
+   proposed in advance as a default target of at least 10 percentage points
+   absolute, replicated in the second trial or supported by a predeclared
+   non-inferiority analysis when the baseline is high.
+3. No family may regress by more than 5 percentage points, no safety or
+   permission boundary may regress, and median context/cost overhead must stay
+   within 15% unless the primary improvement is large enough to justify it in
+   the preregistered plan.
+4. If the primary result is flat, cards are not promoted. Inspect the private
+   action/verification telemetry to decide whether the problem is retrieval,
+   card wording, lack of actionability, or no underlying opportunity. Do not
+   infer improvement from exposure or from a post-hoc favorable subset.
+
+**Exit gate:** a replicated, independently verified improvement over the
+retrieval-disabled baseline with no unacceptable family, safety, privacy, or
+cost regression. If the gate fails twice with different scoped card pools,
+stop expanding generic card retrieval and retain the subsystem as diagnostic
+capture/evaluation infrastructure. Do not begin Milestone 8 on a flat result.
+
+### Milestone 8a.7 — Scoped canary and operating loop
+
+**Implementation status: planned and conditional on a passing 8a.6.**
+
+This is the first step that can make a proven intervention useful in ordinary
+Codex work. It is a narrow canary, not automatic self-modification.
+
+**Implementation changes:**
+
+1. Extend the existing manual promotion path with an experiment/canary
+   identity, explicit workspace/task-family allowlist, maximum active-card
+   count of one for the first canary, short TTL, and kill switch.
+2. Make canary status show the card fingerprint, scope, evidence, expiry,
+   observed exposure/action/verification counts, and rollback predecessor. Do
+   not show or persist raw prompts or command output in the durable status.
+3. Add a documented review cadence: inspect at least 20 affected tasks or a
+   predeclared time window, whichever comes first; retire or roll back on a
+   family regression, safety/privacy issue, unexpected context growth, or
+   repeated unverified recommendations.
+4. Feed reviewed canary outcomes back into the existing evolution history and
+   candidate queue. The loop may propose another experiment, but it must not
+   promote a successor automatically.
+
+**Tests and verification:**
+
+- scope allowlist, TTL, kill-switch, and rollback tests;
+- proof that a canary cannot leak into an unrelated workspace or task family;
+- status/redaction tests for private evidence and public summaries;
+- simulated positive, neutral, negative, and expired canary lifecycles;
+- a documented ordinary-work workflow showing enable, inspect, rollback, and
+  retire operations.
+
+**Exit gate:** a passing intervention can be enabled for a narrow scope,
+observed, and rolled back without changing default Codex behavior. If the
+canary is not stable in ordinary work, retire the card and keep the benchmark,
+telemetry, and evaluation improvements rather than widening the scope.
+
 ### Milestone 8 — Optional program-level evolution and transfer (research)
 
 **Intent:** explore the strongest Meta^n idea—evolving the agent harness or
@@ -702,12 +1031,14 @@ automatic change to system/developer instructions, and no acceptance based on
 one benchmark or one judge score.
 
 **Exit gate:** this milestone is optional and should not be started merely
-because the machinery is available. First use Milestones 8a and 8a.1 to
-establish a repeatable live evaluation baseline with independent checks. It then
-requires a historical benchmark,
+because the machinery is available. First complete 8a.3–8a.6 and, if a
+candidate is activated, 8a.7. Establish a replicated practical gain for a
+scoped intervention before attempting to evolve Skills, prompts, or extension
+policy. Program-level evolution additionally requires a historical benchmark,
 reproducible holdout gains, bounded compute/cost, no safety regression, a
 rollback demonstration, and explicit human approval of the evaluation and
-candidate scope. Otherwise the project should stop at Milestone 8a.1.
+candidate scope. Otherwise the project should stop at the practical-value
+track and retain only the diagnostic infrastructure.
 
 ### Cross-milestone requirements
 
@@ -733,6 +1064,18 @@ Every milestone must preserve the following invariants:
 - **Cost awareness:** measure context tokens, model calls, tool calls, runtime,
   and storage. An improvement that wins task success by disproportionate cost
   is not automatically an improvement.
+- **Benchmark validity:** do not tune cards or claim gains until good fixtures,
+  targeted mutants, evaluator preflights, and baseline difficulty have all
+  passed an independent qualification review.
+- **Intervention budget:** the first practical treatment is one scoped card and
+  300–600 context tokens. Larger context or multiple cards require a separate
+  preregistered comparison.
+- **Unknown attribution:** when the trace cannot establish that an action was
+  attempted or verified, record `unknown`; never convert missing evidence into
+  a negative behavioral label.
+- **Preregistered analysis:** freeze the task pack, card pool, endpoint,
+  exclusions, and decision rule before treatment runs. A favorable subset or
+  metric selected after the run is exploratory only.
 
 ### Recommended execution order
 
@@ -751,20 +1094,59 @@ The practical implementation order is:
 6. Implement Milestone 6 before enabling any non-manual promotion.
 7. Add Milestone 7 for periodic local improvement and keep the loop
    deterministic/manual.
-8. Use Milestones 8a and 8a.1 for a small, private held-out study: dry-run the
-   plan, run paired conditions with independent checks, inspect the redacted
-   result, and record the outcome only after review.
-9. Consider Milestone 8 only if repeated Milestone 8a.1 studies establish
-   transfer, cost, safety, and rollback evidence.
+8. Finish 8a.2 and commit its hardening changes before collecting the next
+   behavioral result. Treat its current tests as harness evidence, not as a
+   claim that cards help the model.
+9. Implement 8a.3 and qualify the benchmark with good/bad fixtures and a
+   retrieval-disabled baseline. Do not launch a treatment run if the baseline
+   is at the ceiling or the evaluator is not mutation-sensitive.
+10. Implement 8a.4 as the smallest behavior-facing change: one scoped,
+    trigger/action/verification intervention with a 300–600-token budget.
+    Compare its offline retrieval precision and context cost with the current
+    broad-card policy.
+11. Implement 8a.5 so selection, injection, action attempt, verification, and
+    outcome are separate private signals. Keep unknown attribution explicit.
+12. Run the 8a.3 smoke procedure, then the preregistered 8a.6 repeated pilot
+    with 32–48 tasks and at least two independent trials per task. Inspect
+    task/family deltas and cost before recording an outcome.
+13. If and only if 8a.6 passes, implement and use 8a.7 for one scoped manual
+    canary with a short TTL and rollback. If it fails, keep the diagnostic
+    infrastructure and revise the card/retrieval hypothesis rather than
+    widening activation.
+14. Consider Milestone 8 only if the practical-value track establishes
+    replicated benefit, acceptable cost, no safety regression, and a working
+    rollback path.
 
 The first useful product loop after the completed foundation is therefore:
 
 ```text
-automatic candidate -> curator review -> active card -> paired evaluation
-       ^                                      |
-       |                                      v
-       +------------- measured next trace ---+
+candidate -> curator review -> scoped intervention -> paired evaluation
+    ^                    |              |                  |
+    |                    v              v                  v
+    +---------- measured telemetry <- canary <- replicated gain
 ```
+
+## Practical-value verification sequence
+
+The following sequence keeps harness validation, retrieval validation, and
+behavioral validation separate. Each stage produces a small reviewable artifact
+and has a stop condition; passing one stage does not imply that the next claim
+is true.
+
+| Stage | What runs | Required artifact | Proceed only when |
+| --- | --- | --- | --- |
+| Q0. Evaluator qualification | Good, no-op, incomplete, and targeted-mutant fixtures; no model | Versioned qualification report and evaluator fingerprint | Good fixtures pass, targeted mutants fail, preflights are green, and no private answer leaks |
+| Q1. Retrieval qualification | Offline broad-vs-scoped selection on fixed queries and failure signals | Precision/coverage/context report and policy fingerprint | Scoped policy lowers irrelevant exposure without losing relevant matches |
+| Q2. Telemetry qualification | Synthetic event chains for selected/injected/attempted/verified/unknown | Redacted telemetry fixture report | Every state transition and unknown case is represented correctly |
+| Q3. Harness smoke | 8–12 fresh tasks, baseline and treatment, no promotion decision | Smoke result with task-level evaluator and cost diagnostics | Isolation, cleanup, preflight, redaction, and result writing are all green |
+| Q4. Behavioral pilot | 32–48 held-out tasks, two independent trials, paired baseline/treatment | Preregistered aggregate result plus private attribution report | Validity passes and the 8a.6 decision rule is satisfied |
+| Q5. Canary | One passing intervention in one allowlisted scope for at least 20 affected tasks or the predeclared window | Canary review and rollback record | Benefit remains stable in ordinary work; otherwise retire and investigate |
+
+The Q3 smoke result is not part of the primary Q4 effect estimate. Q4 must
+report both an intention-to-treat result for all assigned tasks and an
+exploratory attribution view for tasks where an action attempt was observed.
+The latter can explain a flat result, but cannot be used to manufacture a
+positive result by excluding tasks where the card was ignored.
 
 ## Architecture
 
@@ -849,6 +1231,7 @@ Add an `[agent_improvement]` configuration block with:
 enabled = false
 max_cards = 8
 max_context_tokens = 1200
+min_relevance_score = 0
 capture = "off"
 max_candidates = 64
 ```
@@ -919,7 +1302,7 @@ Green:
 
 - add `AgentImprovementToml` and `AgentImprovementConfig`;
 - default `enabled = false`;
-- clamp card count and context budget to safe non-zero bounds;
+- clamp card count, context budget, and relevance floor to bounded values;
 - thread the effective value through `Config`.
 
 Verification:
@@ -1158,6 +1541,19 @@ agent-improvement suite has 10 integration tests. The repository suite does not
 launch a live model or claim an improvement result; that remains an explicit
 operator study.
 
+Milestone 8a.2 additionally verifies evaluator preflight rejection and
+success, argv/no-shell and timeout behavior, relevance-floor filtering,
+private exposure deltas, order-independent selection fingerprints, result
+redaction, config clamping, and schema-versioned plan/result compatibility. The
+focused extension suite has 79 tests, the focused config suite has 383 tests,
+and the CLI agent-improvement suite has 10 integration tests. Formatting and
+diff checks pass. Strict extension Clippy still reports four pre-existing
+structural lints (`large_enum_variant` in `capture.rs` and three
+`too_many_arguments` cases in `schema.rs`); they are outside the hardening
+scope. The full core suite remains environment-limited by unrelated listener,
+proxy, and certificate-write restrictions, so no live behavioral result is
+claimed here.
+
 An earlier broader `cargo test -p codex-core config` run compiled the target
 and then aborted in the unrelated existing
 `tools::handlers::multi_agents::tests::multi_agent_v2_spawn_agent_ignores_configured_max_depth`
@@ -1224,3 +1620,9 @@ cross-task evidence.
 | 8a-B Paired isolated runner | complete | Same-commit baseline/treatment worktrees, isolated stores/traces, source-scope preservation, bounded child execution, and no automatic promotion |
 | 8a-C Evaluator feedback bridge | complete | Redacted result reuse, optional evolution-history outcome recording, dry-run CLI coverage, 73 extension tests, and 10 CLI integration tests |
 | 8a.1 Independent evaluation and observability hardening | complete | Post-run argv checks before cleanup, redacted check evidence, trace/policy separation, bounded evaluator time, live-plan cap, 77 extension tests, and 10 CLI integration tests |
+| 8a.2 Evaluator and retrieval hardening | complete | Preflight contracts, bounded relevance/exposure evidence, redacted selection fingerprints, config/schema tests, 79 extension tests, 383 config tests, and 10 CLI integration tests |
+| 8a.3 Benchmark and evaluator qualification | planned | Versioned non-ceiling task pack, good/no-op/mutant fixtures, evaluator preflight report, and independent qualification review |
+| 8a.4 Intervention cards and task-local retrieval | planned | Versioned trigger/action/verification cards, scoped one-card retrieval, 300–600-token rendering, and offline precision/negative-transfer report |
+| 8a.5 Causal exposure and action telemetry | planned | Private selected/injected/attempted/verified event chain, redacted aggregates, and unknown-attribution tests |
+| 8a.6 Repeated practical-value pilot | planned | Preregistered 32–48-task, two-trial paired study with task/family deltas, cost accounting, and explicit go/no-go decision |
+| 8a.7 Scoped canary and operating loop | planned | Conditional one-card canary with allowlist, TTL, telemetry review, rollback, and retirement evidence |

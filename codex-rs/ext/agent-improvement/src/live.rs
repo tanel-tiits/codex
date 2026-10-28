@@ -24,7 +24,7 @@ use crate::ExperimentBrief;
 use crate::TaskFamily;
 
 /// Version of the private live-evaluation plan contract.
-pub const LIVE_EVALUATION_PLAN_SCHEMA_VERSION: u32 = 1;
+pub const LIVE_EVALUATION_PLAN_SCHEMA_VERSION: u32 = 2;
 
 /// Environment variable used by an isolated child run to select a temporary
 /// agent-improvement store instead of the user's normal store.
@@ -104,6 +104,15 @@ impl LiveEvaluationPlan {
             );
             validate_live_task(&scenario.task)?;
             crate::eval::validate_evaluator(&scenario.evaluator)?;
+            if scenario.evaluator.kind == crate::EvaluatorKind::PostRunVerification {
+                for check in &scenario.evaluator.checks {
+                    ensure!(
+                        check.preflight_command_tokens.is_some(),
+                        "live post-run check {} has no preflight command",
+                        check.check_id
+                    );
+                }
+            }
             crate::eval::validate_budget(&scenario.budget)?;
             ensure!(
                 scenario.budget.max_wall_time_ms <= MAX_LIVE_WALL_TIME_MS,
@@ -313,6 +322,30 @@ mod tests {
         plan.scenarios[0].budget.max_wall_time_ms = EvaluationBudget::default().max_wall_time_ms;
         plan.scenarios[0].budget.max_post_run_time_ms = MAX_LIVE_WALL_TIME_MS + 1;
         assert!(plan.validate().is_err());
+    }
+
+    #[test]
+    fn live_post_run_checks_require_a_preflight_command() {
+        let mut plan = plan();
+        plan.scenarios[0].evaluator = crate::EvaluatorSpec {
+            kind: crate::EvaluatorKind::PostRunVerification,
+            checks: vec![crate::VerificationCheck {
+                check_id: "hidden-tests".to_string(),
+                command_tokens: vec!["python3".to_string(), "hidden_tests.py".to_string()],
+                expected_exit_code: 0,
+                preflight_command_tokens: None,
+                preflight_expected_exit_code: 0,
+            }],
+            require_all_checks: true,
+        };
+        assert!(plan.validate().is_err());
+
+        plan.scenarios[0].evaluator.checks[0].preflight_command_tokens = Some(vec![
+            "python3".to_string(),
+            "hidden_tests.py".to_string(),
+            "--preflight".to_string(),
+        ]);
+        plan.validate().expect("preflight-qualified live plan");
     }
 
     #[test]

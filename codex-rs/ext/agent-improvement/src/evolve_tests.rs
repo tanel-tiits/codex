@@ -248,8 +248,10 @@ fn maintenance_plans_decay_negative_stale_and_excess_cards() -> Result<()> {
         "preserve the review workflow",
         now - 500,
     );
-    let mut config = EvolutionConfig::default();
-    config.max_active_cards = 1;
+    let config = EvolutionConfig {
+        max_active_cards: 1,
+        ..EvolutionConfig::default()
+    };
     let plan = plan_card_maintenance(&[stale, negative, recent], &config, now);
     assert_eq!(plan.active_card_count, 3);
     assert_eq!(plan.stale_card_ids.len(), 1);
@@ -291,7 +293,11 @@ fn explicit_store_maintenance_archives_compacts_exports_and_forgets() -> Result<
     assert_eq!(fs::read_to_string(&archive)?.lines().count(), 3);
     assert_eq!(export_card_store(root.path(), &export, true)?, 2);
 
-    let forgotten = forget_card_store(root.path(), &[first.card_id.clone()], &forget_archive)?;
+    let forgotten = forget_card_store(
+        root.path(),
+        std::slice::from_ref(&first.card_id),
+        &forget_archive,
+    )?;
     assert_eq!(forgotten.removed_card_ids, vec![first.card_id]);
     assert!(forgotten.archived);
     assert_eq!(crate::load_cards(root.path())?.len(), 1);

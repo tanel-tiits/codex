@@ -60,6 +60,7 @@ pub const DEFAULT_MEMORIES_MAX_RAW_MEMORIES_FOR_CONSOLIDATION: usize = 256;
 pub const DEFAULT_MEMORIES_MAX_UNUSED_DAYS: i64 = 30;
 pub const DEFAULT_AGENT_IMPROVEMENT_MAX_CARDS: usize = 8;
 pub const DEFAULT_AGENT_IMPROVEMENT_MAX_CONTEXT_TOKENS: usize = 1_200;
+pub const DEFAULT_AGENT_IMPROVEMENT_MIN_RELEVANCE_SCORE: usize = 0;
 pub const DEFAULT_AGENT_IMPROVEMENT_MAX_CANDIDATES: usize = 64;
 const MIN_MEMORIES_MAX_RAW_MEMORIES_FOR_CONSOLIDATION: usize = 1;
 const MAX_MEMORIES_MAX_RAW_MEMORIES_FOR_CONSOLIDATION: usize = 4096;
@@ -69,6 +70,7 @@ const MIN_AGENT_IMPROVEMENT_MAX_CARDS: usize = 1;
 const MAX_AGENT_IMPROVEMENT_MAX_CARDS: usize = 64;
 const MIN_AGENT_IMPROVEMENT_MAX_CONTEXT_TOKENS: usize = 256;
 const MAX_AGENT_IMPROVEMENT_MAX_CONTEXT_TOKENS: usize = 8_000;
+const MAX_AGENT_IMPROVEMENT_MIN_RELEVANCE_SCORE: usize = 32;
 const MIN_AGENT_IMPROVEMENT_MAX_CANDIDATES: usize = 1;
 const MAX_AGENT_IMPROVEMENT_MAX_CANDIDATES: usize = 256;
 
@@ -349,6 +351,9 @@ pub struct AgentImprovementToml {
     /// Maximum context budget reserved for rendered experience cards.
     #[schemars(range(min = 256, max = 8000))]
     pub max_context_tokens: Option<usize>,
+    /// Minimum structured/lexical relevance score required for retrieval.
+    #[schemars(range(min = 0, max = 32))]
+    pub min_relevance_score: Option<usize>,
     /// Capture mode for local rollout-derived improvement candidates.
     pub capture: Option<AgentImprovementCaptureMode>,
     /// Maximum number of pending candidates retained in the local review queue.
@@ -362,6 +367,7 @@ pub struct AgentImprovementConfig {
     pub enabled: bool,
     pub max_cards: usize,
     pub max_context_tokens: usize,
+    pub min_relevance_score: usize,
     pub capture: AgentImprovementCaptureMode,
     pub max_candidates: usize,
 }
@@ -372,6 +378,7 @@ impl Default for AgentImprovementConfig {
             enabled: false,
             max_cards: DEFAULT_AGENT_IMPROVEMENT_MAX_CARDS,
             max_context_tokens: DEFAULT_AGENT_IMPROVEMENT_MAX_CONTEXT_TOKENS,
+            min_relevance_score: DEFAULT_AGENT_IMPROVEMENT_MIN_RELEVANCE_SCORE,
             capture: AgentImprovementCaptureMode::Off,
             max_candidates: DEFAULT_AGENT_IMPROVEMENT_MAX_CANDIDATES,
         }
@@ -394,6 +401,10 @@ impl From<AgentImprovementToml> for AgentImprovementConfig {
                     MIN_AGENT_IMPROVEMENT_MAX_CONTEXT_TOKENS,
                     MAX_AGENT_IMPROVEMENT_MAX_CONTEXT_TOKENS,
                 ),
+            min_relevance_score: toml
+                .min_relevance_score
+                .unwrap_or(defaults.min_relevance_score)
+                .min(MAX_AGENT_IMPROVEMENT_MIN_RELEVANCE_SCORE),
             capture: toml.capture.unwrap_or(defaults.capture),
             max_candidates: toml
                 .max_candidates

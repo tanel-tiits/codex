@@ -163,7 +163,7 @@ fn candidate_loader_migrates_legacy_embedded_cards() {
             .expect("legacy card object")
             .remove(field);
     }
-    std::fs::write(candidates_path(directory.path()), format!("{}\n", legacy))
+    std::fs::write(candidates_path(directory.path()), format!("{legacy}\n"))
         .expect("write legacy candidate");
 
     let loaded = load_candidates(directory.path()).expect("load migrated candidate");

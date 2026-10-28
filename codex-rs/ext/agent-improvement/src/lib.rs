@@ -29,11 +29,11 @@ pub use eval::{
     EVALUATION_RESULT_SCHEMA_VERSION, EvaluationAggregate, EvaluationBudget, EvaluationCondition,
     EvaluationConditionProvenance, EvaluationConditionResult, EvaluationErrorCode,
     EvaluationManifest, EvaluationMemory, EvaluationMemoryProvenance, EvaluationMetrics,
-    EvaluationRepository, EvaluationResult, EvaluationScenario, EvaluationScenarioResult,
-    EvaluationSplit, EvaluationStatus, EvaluationTask, EvaluatorKind, EvaluatorResult,
-    EvaluatorSpec, EvaluatorStatus, JudgeLabel, MetricDelta, PolicyStatus, PostRunEvidence,
-    TraceStatus, VerificationCheck, evaluate_manifest, evaluate_manifest_at,
-    load_evaluation_manifest, write_evaluation_result,
+    EvaluationRepository, EvaluationResult, EvaluationRetrievalEvidence, EvaluationRetrievalResult,
+    EvaluationScenario, EvaluationScenarioResult, EvaluationSplit, EvaluationStatus,
+    EvaluationTask, EvaluatorKind, EvaluatorResult, EvaluatorSpec, EvaluatorStatus, JudgeLabel,
+    MetricDelta, PolicyStatus, PostRunEvidence, TraceStatus, VerificationCheck, evaluate_manifest,
+    evaluate_manifest_at, load_evaluation_manifest, write_evaluation_result,
 };
 pub use evolve::{
     CardMaintenancePlan, EVOLUTION_HISTORY_FILE_NAME, EVOLUTION_HISTORY_SCHEMA_VERSION,
@@ -81,7 +81,7 @@ pub use store::{
     CardStoreRewriteReport, ExperienceRetrievalContext, STORE_FILE_NAME, append_card, cards_path,
     compact_cards, export_cards, forget_cards, load_cards, record_card_exposure,
     record_card_feedback, record_card_outcome, render_cards, retire_card, retire_cards,
-    select_relevant, select_relevant_with_context,
+    select_relevant, select_relevant_with_context, select_relevant_with_context_and_min_score,
 };
 pub use summarize::summarize_rollout;
 

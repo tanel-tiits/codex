@@ -414,14 +414,46 @@ pub fn select_relevant_with_context(
     context: &ExperienceRetrievalContext,
     max_cards: usize,
 ) -> Vec<ExperienceCard> {
-    select_relevant_at(cards, query, context, max_cards, now_unix_ms())
+    select_relevant_with_context_and_min_score(cards, query, context, max_cards, 0)
 }
 
+/// Selects cards with an explicit relevance floor. A zero floor preserves the
+/// original retrieval behavior; live evaluation can use a stricter floor to
+/// avoid filling its context with generic, unknown-scope cards.
+pub fn select_relevant_with_context_and_min_score(
+    cards: &[ExperienceCard],
+    query: &str,
+    context: &ExperienceRetrievalContext,
+    max_cards: usize,
+    min_relevance_score: usize,
+) -> Vec<ExperienceCard> {
+    select_relevant_at_with_min_score(
+        cards,
+        query,
+        context,
+        max_cards,
+        min_relevance_score,
+        now_unix_ms(),
+    )
+}
+
+#[cfg(test)]
 pub(crate) fn select_relevant_at(
     cards: &[ExperienceCard],
     query: &str,
     context: &ExperienceRetrievalContext,
     max_cards: usize,
+    now_unix_ms: i64,
+) -> Vec<ExperienceCard> {
+    select_relevant_at_with_min_score(cards, query, context, max_cards, 0, now_unix_ms)
+}
+
+pub(crate) fn select_relevant_at_with_min_score(
+    cards: &[ExperienceCard],
+    query: &str,
+    context: &ExperienceRetrievalContext,
+    max_cards: usize,
+    min_relevance_score: usize,
     now_unix_ms: i64,
 ) -> Vec<ExperienceCard> {
     if max_cards == 0 || cards.is_empty() {
@@ -449,6 +481,14 @@ pub(crate) fn select_relevant_at(
             if lexical_score == 0 && topic_score == 0 && structured_score == 0 {
                 return None;
             }
+            let scope_score = scope_match_score(card, context);
+            let relevance_score = usize::from(scope_score) * 2
+                + structured_score as usize
+                + lexical_score.min(8)
+                + topic_score * 2;
+            if relevance_score < min_relevance_score {
+                return None;
+            }
             let evidence_quality = if !card.evidence_profile.facts.is_empty() {
                 2u8
             } else if !card.evidence_profile.hypotheses.is_empty() {
@@ -456,7 +496,6 @@ pub(crate) fn select_relevant_at(
             } else {
                 1u8
             };
-            let scope_score = scope_match_score(card, context);
             let recency_score = recency_score(card.recurrence.last_seen_at_unix_ms, now_unix_ms);
             Some((
                 scope_score,
