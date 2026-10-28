@@ -4,6 +4,10 @@ Status: Milestone 8a.1 independent evaluation and observability hardening
 complete; Milestones 1–7 and 8a complete; full program-level evolution and
 transfer remain gated
 
+Latest live study: [Milestone 8a.1 pilot report](agent-improvement-pilot-8a1.md).
+It found no task-success lift in the first corrected 8-task study, so Milestone
+8 remains gated.
+
 ## Objective
 
 Integrate the immediately adoptable, essential, and high-value ideas from the
