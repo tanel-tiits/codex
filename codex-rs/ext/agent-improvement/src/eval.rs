@@ -4,8 +4,8 @@
 //! It deliberately does not launch a model, write a checkout, or read an
 //! active card store. That makes the evaluation path suitable for offline CI
 //! and prevents an evaluation command from inheriting live approval,
-//! credential, or sandbox state. A future live runner can produce the bundles
-//! consumed here under a separately reviewed execution policy.
+//! credential, or sandbox state. The Milestone 8a live bridge can produce the
+//! bundles consumed here under a separately reviewed execution policy.
 
 use std::collections::BTreeMap;
 use std::collections::BTreeSet;
@@ -426,7 +426,7 @@ fn validate_condition(condition: &EvaluationCondition, label: &str) -> Result<()
     Ok(())
 }
 
-fn validate_evaluator(evaluator: &EvaluatorSpec) -> Result<()> {
+pub(crate) fn validate_evaluator(evaluator: &EvaluatorSpec) -> Result<()> {
     if evaluator.kind == EvaluatorKind::Verification {
         ensure!(
             !evaluator.checks.is_empty(),
@@ -463,7 +463,7 @@ fn validate_evaluator(evaluator: &EvaluatorSpec) -> Result<()> {
     Ok(())
 }
 
-fn validate_budget(budget: &EvaluationBudget) -> Result<()> {
+pub(crate) fn validate_budget(budget: &EvaluationBudget) -> Result<()> {
     ensure!(
         budget.max_trace_bytes > 0,
         "max_trace_bytes must be positive"

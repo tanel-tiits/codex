@@ -11,6 +11,7 @@ mod eval;
 mod evolve;
 mod extension;
 mod improvement;
+mod live;
 mod promotion;
 mod schema;
 mod store;
@@ -50,6 +51,12 @@ pub use improvement::{
     ImprovementEvidenceKind, ImprovementEvidenceReference, ImprovementExpiry, ImprovementRollback,
     ImprovementTarget, ImprovementValidationKind, ImprovementValidationRequirement,
     load_improvement_candidate, write_improvement_candidate,
+};
+pub use live::{
+    AGENT_IMPROVEMENT_ROOT_ENV, AGENT_IMPROVEMENT_WORKSPACE_PATH_ENV,
+    LIVE_EVALUATION_PLAN_SCHEMA_VERSION, LiveEvaluationPlan, LiveEvaluationScenario,
+    fingerprint_card_set, fingerprint_descriptor, fingerprint_evaluation_result,
+    load_experiment_brief, load_live_evaluation_plan,
 };
 pub use promotion::{
     ImprovementState, PROMOTION_EVENT_SCHEMA_VERSION, PROMOTION_EVENT_STORE_FILE_NAME,

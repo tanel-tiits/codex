@@ -22,6 +22,8 @@ use codex_extension_api::TurnStopInput;
 use codex_protocol::user_input::UserInput;
 use codex_rollout_trace::ThreadTraceContext;
 
+use crate::AGENT_IMPROVEMENT_ROOT_ENV;
+use crate::AGENT_IMPROVEMENT_WORKSPACE_PATH_ENV;
 use crate::CandidateTrigger;
 use crate::ExperienceRetrievalContext;
 use crate::capture::CandidateCaptureOutcome;
@@ -53,7 +55,9 @@ impl AgentImprovementExtensionConfig {
     fn from_config(config: &Config) -> Self {
         Self {
             enabled: config.agent_improvement.enabled,
-            root: config.codex_home.join("agent-improvement").to_path_buf(),
+            root: std::env::var_os(AGENT_IMPROVEMENT_ROOT_ENV)
+                .map(PathBuf::from)
+                .unwrap_or_else(|| config.codex_home.join("agent-improvement").to_path_buf()),
             max_cards: config.agent_improvement.max_cards,
             max_context_tokens: config.agent_improvement.max_context_tokens,
             capture: config.agent_improvement.capture,
@@ -195,12 +199,16 @@ impl TurnInputContributor for AgentImprovementExtension {
                 })
                 .collect::<Vec<_>>()
                 .join("\n");
-            let workspace_path = input
-                .environments
-                .iter()
-                .find(|environment| environment.is_primary)
-                .or_else(|| input.environments.first())
-                .map(|environment| environment.cwd.inferred_native_path_string());
+            let workspace_path = std::env::var(AGENT_IMPROVEMENT_WORKSPACE_PATH_ENV)
+                .ok()
+                .or_else(|| {
+                    input
+                        .environments
+                        .iter()
+                        .find(|environment| environment.is_primary)
+                        .or_else(|| input.environments.first())
+                        .map(|environment| environment.cwd.inferred_native_path_string())
+                });
             self.contribute_for_query(&config, &query, workspace_path.as_deref())
         })
     }

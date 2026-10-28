@@ -1,10 +1,21 @@
+use anyhow::Context;
 use clap::Args;
 use clap::CommandFactory;
 use clap::Parser;
 use clap_complete::Shell;
 use clap_complete::generate;
+use codex_agent_improvement_extension::AGENT_IMPROVEMENT_ROOT_ENV;
+use codex_agent_improvement_extension::AGENT_IMPROVEMENT_WORKSPACE_PATH_ENV;
+use codex_agent_improvement_extension::AttributionEvidence;
 use codex_agent_improvement_extension::AttributionState;
 use codex_agent_improvement_extension::CandidateStatus;
+use codex_agent_improvement_extension::EVALUATION_MANIFEST_SCHEMA_VERSION;
+use codex_agent_improvement_extension::EXPERIENCE_CARD_SCHEMA_VERSION;
+use codex_agent_improvement_extension::EvaluationCondition;
+use codex_agent_improvement_extension::EvaluationManifest;
+use codex_agent_improvement_extension::EvaluationMemory;
+use codex_agent_improvement_extension::EvaluationRepository;
+use codex_agent_improvement_extension::EvaluationScenario;
 use codex_agent_improvement_extension::EvolutionConfig;
 use codex_agent_improvement_extension::EvolutionOutcome;
 use codex_agent_improvement_extension::ExperienceCandidate;
@@ -12,6 +23,8 @@ use codex_agent_improvement_extension::FeedbackState;
 use codex_agent_improvement_extension::ImprovementCandidate;
 use codex_agent_improvement_extension::ImprovementCandidateStatus;
 use codex_agent_improvement_extension::ImprovementEvidenceCatalog;
+use codex_agent_improvement_extension::LiveEvaluationPlan;
+use codex_agent_improvement_extension::LiveEvaluationScenario;
 use codex_agent_improvement_extension::accept_proposal;
 use codex_agent_improvement_extension::append_card;
 use codex_agent_improvement_extension::apply_card_maintenance;
@@ -24,11 +37,16 @@ use codex_agent_improvement_extension::evaluate_proposal;
 use codex_agent_improvement_extension::evolve_root;
 use codex_agent_improvement_extension::export_card_store;
 use codex_agent_improvement_extension::find_candidate;
+use codex_agent_improvement_extension::fingerprint_card_set;
+use codex_agent_improvement_extension::fingerprint_descriptor;
+use codex_agent_improvement_extension::fingerprint_evaluation_result;
 use codex_agent_improvement_extension::forget_card_store;
 use codex_agent_improvement_extension::load_candidates;
 use codex_agent_improvement_extension::load_cards;
 use codex_agent_improvement_extension::load_evaluation_manifest;
+use codex_agent_improvement_extension::load_experiment_brief;
 use codex_agent_improvement_extension::load_improvement_candidate;
+use codex_agent_improvement_extension::load_live_evaluation_plan;
 use codex_agent_improvement_extension::load_promotion_policy;
 use codex_agent_improvement_extension::load_runtime_cards;
 use codex_agent_improvement_extension::plan_card_maintenance;
@@ -84,7 +102,12 @@ use std::collections::HashSet;
 use std::io::IsTerminal;
 use std::io::Write;
 use std::path::PathBuf;
+use std::process::Command as ProcessCommand;
+use std::process::Stdio;
 use std::sync::Arc;
+use std::thread;
+use std::time::Duration;
+use std::time::Instant;
 use supports_color::Stream;
 
 #[cfg(all(
@@ -637,6 +660,9 @@ enum DebugAgentImprovementEvolveSubcommand {
     /// Aggregate local cards and candidates into bounded experiment briefs.
     Run(DebugAgentImprovementEvolveRunCommand),
 
+    /// Run a manual, isolated baseline-versus-treatment evaluation for one brief.
+    Evaluate(DebugAgentImprovementEvolveEvaluateCommand),
+
     /// Record an explicit held-out outcome for a generated experiment brief.
     Record(DebugAgentImprovementEvolveRecordCommand),
 
@@ -695,6 +721,61 @@ struct DebugAgentImprovementEvolveRunCommand {
     /// Minimum held-out scenarios requested by each brief.
     #[arg(long = "minimum-evaluation-scenarios", default_value_t = 2)]
     minimum_evaluation_scenarios: u32,
+}
+
+#[derive(Debug, Parser)]
+struct DebugAgentImprovementEvolveEvaluateCommand {
+    /// Stable brief ID returned by `evolve run`.
+    #[arg(value_name = "BRIEF_ID")]
+    brief_id: String,
+
+    /// JSON file containing one brief or the report emitted by `evolve run`.
+    #[arg(long = "briefs", value_name = "FILE", required = true)]
+    briefs: PathBuf,
+
+    /// Private held-out task plan containing prompts and the source checkout.
+    #[arg(long = "plan", value_name = "FILE", required = true)]
+    plan: PathBuf,
+
+    /// Agent-improvement store whose cards form the treatment condition.
+    #[arg(long = "store", value_name = "DIR", required = true)]
+    store: PathBuf,
+
+    /// Parent directory for isolated worktrees, traces, and private manifests.
+    #[arg(long = "run-root", value_name = "DIR", required = true)]
+    run_root: PathBuf,
+
+    /// Redacted aggregate evaluation result destination.
+    #[arg(long = "output", short = 'o', value_name = "FILE", required = true)]
+    output: PathBuf,
+
+    /// Codex executable used for child runs; defaults to this executable.
+    #[arg(long = "codex-bin", value_name = "FILE")]
+    codex_bin: Option<PathBuf>,
+
+    /// Optional model override forwarded to both paired conditions.
+    #[arg(long = "model", short = 'm', value_name = "MODEL")]
+    model: Option<String>,
+
+    /// Maximum held-out tasks to execute in this run.
+    #[arg(long = "max-scenarios", default_value_t = 32)]
+    max_scenarios: usize,
+
+    /// Record the derived outcome in evolution-history.jsonl after evaluation.
+    #[arg(long = "record-outcome", default_value_t = false)]
+    record_outcome: bool,
+
+    /// Actor recorded when --record-outcome is supplied.
+    #[arg(long = "actor", value_name = "ACTOR", default_value = "live-evaluator")]
+    actor: String,
+
+    /// Retain isolated worktrees after a successful run for inspection.
+    #[arg(long = "keep-worktrees", default_value_t = false)]
+    keep_worktrees: bool,
+
+    /// Validate the plan and print the execution contract without launching Codex.
+    #[arg(long = "dry-run", default_value_t = false)]
+    dry_run: bool,
 }
 
 #[derive(Debug, Parser)]
@@ -3020,6 +3101,9 @@ fn run_debug_agent_improvement_evolve_command(
             }
             println!("{}", String::from_utf8(output)?);
         }
+        DebugAgentImprovementEvolveSubcommand::Evaluate(cmd) => {
+            run_debug_agent_improvement_evaluate_command(cmd)?;
+        }
         DebugAgentImprovementEvolveSubcommand::Record(cmd) => {
             let outcome = EvolutionOutcome::parse(&cmd.outcome).ok_or_else(|| {
                 anyhow::anyhow!(
@@ -3090,6 +3174,560 @@ fn run_debug_agent_improvement_evolve_command(
         }
     }
     Ok(())
+}
+
+fn run_debug_agent_improvement_evaluate_command(
+    cmd: DebugAgentImprovementEvolveEvaluateCommand,
+) -> anyhow::Result<()> {
+    let brief = load_experiment_brief(&cmd.briefs, &cmd.brief_id)?;
+    anyhow::ensure!(
+        brief.status == codex_agent_improvement_extension::ExperimentBriefStatus::Proposed,
+        "brief {} is not in the proposed state",
+        brief.brief_id
+    );
+    let plan = load_live_evaluation_plan(&cmd.plan)?;
+    validate_live_evaluation_request(&brief, &plan, &cmd)?;
+
+    let source_checkout = path_identity_for_cli(&plan.primary_checkout);
+    let run_root = path_identity_for_cli(&cmd.run_root);
+    anyhow::ensure!(
+        !paths_overlap_for_cli(&source_checkout, &run_root),
+        "live evaluation run root overlaps the primary checkout"
+    );
+    let source_checkout_string = source_checkout.to_str().ok_or_else(|| {
+        anyhow::anyhow!("primary checkout path is not valid UTF-8 for workspace scoping")
+    })?;
+    let source_scope = codex_agent_improvement_extension::ExperienceScope::for_workspace_path(
+        source_checkout_string,
+    );
+    if let Some(expected_workspace_key) = &brief.evaluation_set.scope.workspace_key {
+        anyhow::ensure!(
+            source_scope.workspace_key.as_deref() == Some(expected_workspace_key.as_str()),
+            "live evaluation checkout does not match the brief workspace scope"
+        );
+    }
+
+    let codex_bin = cmd
+        .codex_bin
+        .clone()
+        .unwrap_or(std::env::current_exe().context("resolve current Codex executable")?);
+    if cmd.dry_run {
+        anyhow::ensure!(
+            !cmd.record_outcome,
+            "--record-outcome cannot be combined with --dry-run"
+        );
+        println!(
+            "{}",
+            serde_json::json!({
+                "brief_id": brief.brief_id,
+                "brief_fingerprint": brief.fingerprint,
+                "plan_id": plan.plan_id,
+                "scenario_count": plan.scenario_count().min(cmd.max_scenarios),
+                "codex_binary": codex_bin,
+                "dry_run": true,
+                "sandbox": "workspace-write",
+                "approval_policy": "never",
+                "automatic_promotion": false,
+            })
+        );
+        return Ok(());
+    }
+
+    let source_commit = git_head(&source_checkout)?;
+    ensure_clean_checkout(&source_checkout)?;
+    std::fs::create_dir_all(&run_root)
+        .with_context(|| format!("create live evaluation run root {}", run_root.display()))?;
+    let run_dir = run_root.join(format!("run-{}-{}", current_unix_ms(), std::process::id()));
+    std::fs::create_dir(&run_dir)
+        .with_context(|| format!("create live evaluation run directory {}", run_dir.display()))?;
+
+    let baseline_store = run_dir.join("baseline-state");
+    let treatment_store = run_dir.join("treatment-state");
+    std::fs::create_dir_all(&baseline_store)?;
+    std::fs::create_dir_all(&treatment_store)?;
+    copy_card_store(&cmd.store, &treatment_store)?;
+    let initial_cards = load_cards(&cmd.store)?;
+    let treatment_card_set_fingerprint = fingerprint_card_set(&initial_cards);
+    let baseline_card_set_fingerprint = fingerprint_card_set(&[]);
+    let retrieval_policy_fingerprint = fingerprint_descriptor(
+        "retrieval-policy-v1",
+        "max_cards=8;max_context_tokens=2000;workspace_override=source",
+    );
+    let policy_fingerprint = fingerprint_descriptor(
+        "execution-policy-v1",
+        "sandbox=workspace-write;approval_policy=never;hooks=project-policy",
+    );
+    let execution_fingerprint = fingerprint_descriptor(
+        "execution-config-v1",
+        &format!(
+            "model={};ephemeral=true;capture=off",
+            cmd.model.as_deref().unwrap_or("configured")
+        ),
+    );
+
+    let mut scenarios = Vec::with_capacity(plan.scenarios.len());
+    let mut worktrees = Vec::with_capacity(plan.scenarios.len() * 2);
+    for scenario in plan.scenarios.iter().take(cmd.max_scenarios) {
+        let scenario_root = run_dir.join("scenarios").join(&scenario.scenario_id);
+        let baseline_worktree = scenario_root.join("baseline-worktree");
+        let treatment_worktree = scenario_root.join("treatment-worktree");
+        let baseline_trace_root = scenario_root.join("baseline-traces");
+        let treatment_trace_root = scenario_root.join("treatment-traces");
+        std::fs::create_dir_all(&scenario_root)?;
+        std::fs::create_dir_all(&baseline_trace_root)?;
+        std::fs::create_dir_all(&treatment_trace_root)?;
+        create_git_worktree(&source_checkout, &baseline_worktree, &source_commit)?;
+        worktrees.push(baseline_worktree.clone());
+        create_git_worktree(&source_checkout, &treatment_worktree, &source_commit)?;
+        worktrees.push(treatment_worktree.clone());
+
+        let baseline_trace = run_live_condition(
+            &codex_bin,
+            scenario,
+            &baseline_worktree,
+            &baseline_trace_root,
+            &baseline_store,
+            source_checkout_string,
+            false,
+            cmd.model.as_deref(),
+        )?;
+        let exposure_before = total_card_exposure(&treatment_store)?;
+        let treatment_trace = run_live_condition(
+            &codex_bin,
+            scenario,
+            &treatment_worktree,
+            &treatment_trace_root,
+            &treatment_store,
+            source_checkout_string,
+            true,
+            cmd.model.as_deref(),
+        )?;
+        let exposure_after = total_card_exposure(&treatment_store)?;
+
+        let attribution = AttributionEvidence {
+            exposure: if exposure_after > exposure_before {
+                AttributionState::Yes
+            } else {
+                AttributionState::No
+            },
+            followed: AttributionState::Unknown,
+            evidence_id: None,
+        };
+        scenarios.push(EvaluationScenario {
+            scenario_id: scenario.scenario_id.clone(),
+            task_family: scenario.task_family,
+            split: scenario.split,
+            task: scenario.task.clone(),
+            repository: EvaluationRepository {
+                snapshot_fingerprint: source_commit.clone(),
+                primary_checkout: Some(source_checkout.clone()),
+            },
+            baseline: live_condition(
+                baseline_trace,
+                baseline_worktree,
+                &source_commit,
+                &execution_fingerprint,
+                &policy_fingerprint,
+                &retrieval_policy_fingerprint,
+                false,
+                &baseline_card_set_fingerprint,
+                None,
+            ),
+            treatment: live_condition(
+                treatment_trace,
+                treatment_worktree,
+                &source_commit,
+                &execution_fingerprint,
+                &policy_fingerprint,
+                &retrieval_policy_fingerprint,
+                true,
+                &treatment_card_set_fingerprint,
+                Some(treatment_store.clone()),
+            ),
+            evaluator: scenario.evaluator.clone(),
+            budget: scenario.budget.clone(),
+            attribution,
+        });
+    }
+
+    let manifest = EvaluationManifest {
+        schema_version: EVALUATION_MANIFEST_SCHEMA_VERSION,
+        manifest_id: format!(
+            "live_{}",
+            fingerprint_descriptor(
+                "manifest-v1",
+                &format!(
+                    "brief={};brief_fingerprint={};plan={};commit={};scenarios={}",
+                    brief.brief_id,
+                    brief.fingerprint,
+                    plan.plan_id,
+                    source_commit,
+                    plan.scenarios
+                        .iter()
+                        .take(cmd.max_scenarios)
+                        .map(|scenario| scenario.scenario_id.as_str())
+                        .collect::<Vec<_>>()
+                        .join(",")
+                )
+            )
+            .trim_start_matches("sha256:")
+        ),
+        scenarios,
+    };
+    manifest.validate()?;
+    let manifest_path = run_dir.join("evaluation-manifest.json");
+    std::fs::write(&manifest_path, serde_json::to_vec_pretty(&manifest)?)?;
+    let result =
+        codex_agent_improvement_extension::evaluate_manifest_at(&manifest, current_unix_ms())?;
+    write_evaluation_result(&manifest, &result, &cmd.output)?;
+
+    if cmd.record_outcome {
+        let result_fingerprint = fingerprint_evaluation_result(&result)?;
+        let (outcome, task_success_delta_bps, verification_delta_bps, reason) =
+            live_evolution_outcome(&brief, &result);
+        record_evolution_outcome(
+            &cmd.store,
+            brief.brief_id.clone(),
+            brief.fingerprint.clone(),
+            cmd.actor,
+            outcome,
+            Some(result_fingerprint),
+            task_success_delta_bps,
+            verification_delta_bps,
+            reason,
+            current_unix_ms(),
+        )?;
+    }
+
+    if !cmd.keep_worktrees {
+        for worktree in worktrees.iter().rev() {
+            remove_git_worktree(&source_checkout, worktree)?;
+        }
+    }
+    println!("{}", serde_json::to_string_pretty(&result)?);
+    Ok(())
+}
+
+fn validate_live_evaluation_request(
+    brief: &codex_agent_improvement_extension::ExperimentBrief,
+    plan: &LiveEvaluationPlan,
+    cmd: &DebugAgentImprovementEvolveEvaluateCommand,
+) -> anyhow::Result<()> {
+    anyhow::ensure!(
+        plan.brief_id == brief.brief_id,
+        "live plan targets {}, expected brief {}",
+        plan.brief_id,
+        brief.brief_id
+    );
+    anyhow::ensure!(
+        plan.brief_fingerprint == brief.fingerprint,
+        "live plan brief fingerprint does not match the selected brief"
+    );
+    anyhow::ensure!(
+        (1..=64).contains(&cmd.max_scenarios),
+        "--max-scenarios must be between 1 and 64"
+    );
+    anyhow::ensure!(
+        plan.scenario_count() >= brief.evaluation_set.minimum_scenarios as usize,
+        "live plan contains fewer scenarios than the brief requires"
+    );
+    anyhow::ensure!(
+        cmd.max_scenarios >= brief.evaluation_set.minimum_scenarios as usize,
+        "--max-scenarios is below the brief minimum"
+    );
+    for scenario in &plan.scenarios {
+        anyhow::ensure!(
+            scenario.task_family == brief.evaluation_set.task_family,
+            "scenario {} does not match the brief task family",
+            scenario.scenario_id
+        );
+    }
+    Ok(())
+}
+
+fn live_condition(
+    trace_bundle: PathBuf,
+    worktree: PathBuf,
+    worktree_fingerprint: &str,
+    execution_config_fingerprint: &str,
+    policy_fingerprint: &str,
+    retrieval_policy_fingerprint: &str,
+    enabled: bool,
+    card_set_fingerprint: &str,
+    card_store_path: Option<PathBuf>,
+) -> EvaluationCondition {
+    EvaluationCondition {
+        trace_bundle,
+        worktree,
+        worktree_fingerprint: worktree_fingerprint.to_string(),
+        execution_config_fingerprint: execution_config_fingerprint.to_string(),
+        policy_fingerprint: policy_fingerprint.to_string(),
+        memory: EvaluationMemory {
+            enabled,
+            card_set_fingerprint: card_set_fingerprint.to_string(),
+            retrieval_policy_fingerprint: retrieval_policy_fingerprint.to_string(),
+            card_schema_version: EXPERIENCE_CARD_SCHEMA_VERSION,
+            card_store_path,
+        },
+        judge: None,
+    }
+}
+
+fn run_live_condition(
+    codex_bin: &std::path::Path,
+    scenario: &LiveEvaluationScenario,
+    worktree: &std::path::Path,
+    trace_root: &std::path::Path,
+    store_root: &std::path::Path,
+    source_workspace: &str,
+    memory_enabled: bool,
+    model: Option<&str>,
+) -> anyhow::Result<PathBuf> {
+    let prompt =
+        scenario.task.prompt.as_deref().ok_or_else(|| {
+            anyhow::anyhow!("live scenario {} has no prompt", scenario.scenario_id)
+        })?;
+    let mut command = ProcessCommand::new(codex_bin);
+    command
+        .arg("-c")
+        .arg("approval_policy=\"never\"")
+        .arg("-c")
+        .arg("sandbox_mode=\"workspace-write\"")
+        .arg("-c")
+        .arg(format!("agent_improvement.enabled={memory_enabled}"))
+        .arg("-c")
+        .arg("agent_improvement.capture=\"off\"")
+        .arg("-c")
+        .arg("agent_improvement.max_cards=8")
+        .arg("-c")
+        .arg("agent_improvement.max_context_tokens=2000")
+        .arg("exec")
+        .arg("--json")
+        .arg("--ephemeral")
+        .arg("--skip-git-repo-check")
+        .arg("--sandbox")
+        .arg("workspace-write");
+    if let Some(model) = model {
+        command.arg("--model").arg(model);
+    }
+    let status = command
+        .arg("--")
+        .arg(prompt)
+        .current_dir(worktree)
+        .env(AGENT_IMPROVEMENT_ROOT_ENV, store_root)
+        .env(AGENT_IMPROVEMENT_WORKSPACE_PATH_ENV, source_workspace)
+        .env("CODEX_ROLLOUT_TRACE_ROOT", trace_root)
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .spawn()
+        .with_context(|| format!("launch live evaluation for {}", scenario.scenario_id))?;
+    let _ = wait_for_live_condition(status, scenario.budget.max_wall_time_ms)?;
+    find_trace_bundle(trace_root, &scenario.scenario_id)
+}
+
+fn wait_for_live_condition(
+    mut child: std::process::Child,
+    max_wall_time_ms: u64,
+) -> anyhow::Result<Option<std::process::ExitStatus>> {
+    let deadline = Instant::now() + Duration::from_millis(max_wall_time_ms);
+    loop {
+        if let Some(status) = child.try_wait()? {
+            return Ok(Some(status));
+        }
+        if Instant::now() >= deadline {
+            let _ = child.kill();
+            let _ = child.wait();
+            return Ok(None);
+        }
+        thread::sleep(Duration::from_millis(50));
+    }
+}
+
+fn find_trace_bundle(root: &std::path::Path, scenario_id: &str) -> anyhow::Result<PathBuf> {
+    let mut bundles = Vec::new();
+    for entry in std::fs::read_dir(root)
+        .with_context(|| format!("read live trace root {}", root.display()))?
+    {
+        let path = entry?.path();
+        if path.is_dir() && path.join("manifest.json").is_file() {
+            bundles.push(path);
+        }
+    }
+    anyhow::ensure!(
+        bundles.len() == 1,
+        "live scenario {} produced {} trace bundles; expected exactly one",
+        scenario_id,
+        bundles.len()
+    );
+    Ok(bundles.remove(0))
+}
+
+fn copy_card_store(
+    source_root: &std::path::Path,
+    destination_root: &std::path::Path,
+) -> anyhow::Result<()> {
+    let source = cards_path(source_root);
+    if source.is_file() {
+        std::fs::copy(&source, cards_path(destination_root))
+            .with_context(|| format!("copy treatment card store from {}", source.display()))?;
+    }
+    Ok(())
+}
+
+fn total_card_exposure(root: &std::path::Path) -> anyhow::Result<u64> {
+    Ok(load_cards(root)?
+        .into_iter()
+        .map(|card| u64::from(card.adoption.exposure_count))
+        .sum())
+}
+
+fn git_head(checkout: &std::path::Path) -> anyhow::Result<String> {
+    let output = ProcessCommand::new("git")
+        .current_dir(checkout)
+        .args(["rev-parse", "HEAD"])
+        .output()
+        .with_context(|| format!("read git HEAD for {}", checkout.display()))?;
+    anyhow::ensure!(
+        output.status.success(),
+        "primary checkout is not a usable git repository"
+    );
+    let head = String::from_utf8(output.stdout)?.trim().to_string();
+    anyhow::ensure!(
+        !head.is_empty() && head.len() <= 128,
+        "git HEAD fingerprint is invalid"
+    );
+    Ok(head)
+}
+
+fn ensure_clean_checkout(checkout: &std::path::Path) -> anyhow::Result<()> {
+    let output = ProcessCommand::new("git")
+        .current_dir(checkout)
+        .args(["status", "--porcelain", "--untracked-files=all"])
+        .output()
+        .with_context(|| format!("inspect git checkout {}", checkout.display()))?;
+    anyhow::ensure!(
+        output.status.success(),
+        "could not inspect primary checkout"
+    );
+    anyhow::ensure!(
+        output.stdout.is_empty(),
+        "primary checkout must be clean before live evaluation"
+    );
+    Ok(())
+}
+
+fn create_git_worktree(
+    source_checkout: &std::path::Path,
+    worktree: &std::path::Path,
+    commit: &str,
+) -> anyhow::Result<()> {
+    if let Some(parent) = worktree.parent() {
+        std::fs::create_dir_all(parent)?;
+    }
+    let output = ProcessCommand::new("git")
+        .current_dir(source_checkout)
+        .args(["worktree", "add", "--detach"])
+        .arg(worktree)
+        .arg(commit)
+        .output()
+        .with_context(|| format!("create evaluation worktree {}", worktree.display()))?;
+    anyhow::ensure!(
+        output.status.success(),
+        "could not create isolated evaluation worktree"
+    );
+    Ok(())
+}
+
+fn remove_git_worktree(
+    source_checkout: &std::path::Path,
+    worktree: &std::path::Path,
+) -> anyhow::Result<()> {
+    let output = ProcessCommand::new("git")
+        .current_dir(source_checkout)
+        .args(["worktree", "remove", "--force"])
+        .arg(worktree)
+        .output()
+        .with_context(|| format!("remove evaluation worktree {}", worktree.display()))?;
+    anyhow::ensure!(
+        output.status.success(),
+        "could not remove isolated evaluation worktree"
+    );
+    Ok(())
+}
+
+fn live_evolution_outcome(
+    brief: &codex_agent_improvement_extension::ExperimentBrief,
+    result: &codex_agent_improvement_extension::EvaluationResult,
+) -> (EvolutionOutcome, Option<i32>, Option<i32>, String) {
+    let task_success_delta_bps = aggregate_delta_bps(
+        result.held_out.baseline_success_count,
+        result.held_out.treatment_success_count,
+        result.held_out.scenario_count,
+    );
+    let verification_delta_bps = aggregate_delta_bps(
+        result.held_out.baseline_verification_success_count,
+        result.held_out.treatment_verification_success_count,
+        result.held_out.scenario_count,
+    );
+    let (baseline, treatment, metric_name) = match brief.expected_metric {
+        codex_agent_improvement_extension::EvolutionMetric::TaskSuccess => (
+            result.held_out.baseline_success_count,
+            result.held_out.treatment_success_count,
+            "task_success",
+        ),
+        codex_agent_improvement_extension::EvolutionMetric::VerificationSuccess => (
+            result.held_out.baseline_verification_success_count,
+            result.held_out.treatment_verification_success_count,
+            "verification_success",
+        ),
+        codex_agent_improvement_extension::EvolutionMetric::RecommendationFollowed => {
+            return (
+                EvolutionOutcome::Inconclusive,
+                task_success_delta_bps,
+                verification_delta_bps,
+                "live evaluation cannot infer whether a recommendation was followed".to_string(),
+            );
+        }
+    };
+    let outcome = if result.held_out.paired_count == 0 {
+        EvolutionOutcome::Inconclusive
+    } else if treatment > baseline {
+        EvolutionOutcome::Improved
+    } else if treatment < baseline {
+        EvolutionOutcome::Regression
+    } else {
+        EvolutionOutcome::NoImprovement
+    };
+    let reason = format!(
+        "live held-out evaluation {metric_name}: baseline={baseline}, treatment={treatment}, paired={}",
+        result.held_out.paired_count
+    );
+    (
+        outcome,
+        task_success_delta_bps,
+        verification_delta_bps,
+        reason,
+    )
+}
+
+fn aggregate_delta_bps(baseline: u32, treatment: u32, scenarios: u32) -> Option<i32> {
+    if scenarios == 0 {
+        return None;
+    }
+    let baseline = i64::from(baseline).saturating_mul(10_000) / i64::from(scenarios);
+    let treatment = i64::from(treatment).saturating_mul(10_000) / i64::from(scenarios);
+    i32::try_from(treatment.saturating_sub(baseline))
+        .ok()
+        .or_else(|| {
+            i32::try_from(baseline.saturating_sub(treatment))
+                .ok()
+                .map(|delta| -delta)
+        })
+}
+
+fn paths_overlap_for_cli(left: &std::path::Path, right: &std::path::Path) -> bool {
+    left.starts_with(right) || right.starts_with(left)
 }
 
 fn ensure_evolution_output_path(
@@ -4828,6 +5466,21 @@ enabled = true
         assert_eq!(command.output, Some(PathBuf::from("/tmp/briefs.json")));
 
         for args in [
+            vec![
+                "evaluate",
+                "experiment_123",
+                "--briefs",
+                "/tmp/briefs.json",
+                "--plan",
+                "/tmp/live-plan.json",
+                "--store",
+                "/tmp/agent-improvement",
+                "--run-root",
+                "/tmp/live-runs",
+                "--output",
+                "/tmp/evaluation.json",
+                "--dry-run",
+            ],
             vec![
                 "record",
                 "experiment_123",

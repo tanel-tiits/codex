@@ -317,6 +317,91 @@ cards, edit Skills, modify `AGENTS.md`, change configuration, or grant
 permissions. Held-out improvement evidence and the Milestone 6 human review
 workflow remain required.
 
+## Run a live held-out evaluation
+
+Milestone 8a adds a manual bridge from an experiment brief to paired live
+Codex runs. It is useful when a deterministic brief is ready for a real test,
+but it is intentionally outside normal turn preparation and never promotes a
+card automatically.
+
+First generate and inspect the brief report:
+
+```bash
+codex debug agent-improvement evolve run \
+  --store "$CODEX_HOME/agent-improvement" \
+  --output /private/tmp/experiment-briefs.json
+```
+
+Create a private plan for the selected brief. Keep this file outside the
+repository and do not publish it: it contains held-out prompts and filesystem
+paths. Its essential shape is:
+
+```json
+{
+  "schema_version": 1,
+  "plan_id": "parser-held-out-v1",
+  "brief_id": "experiment_<ID>",
+  "brief_fingerprint": "sha256:<brief fingerprint>",
+  "primary_checkout": "/private/path/to/clean/codex-checkout",
+  "scenarios": [
+    {
+      "scenario_id": "parser-001",
+      "task_family": "coding",
+      "split": "held_out",
+      "task": {
+        "task_id": "parser-fix-001",
+        "prompt": "<private held-out task prompt>",
+        "fingerprint": "sha256:<task fingerprint>"
+      },
+      "evaluator": {
+        "kind": "trace_outcome",
+        "checks": [],
+        "require_all_checks": true
+      },
+      "budget": {
+        "max_trace_bytes": 67108864,
+        "max_tokens": 2000000,
+        "max_wall_time_ms": 1800000,
+        "max_tool_calls": 512,
+        "max_terminal_operations": 512
+      }
+    }
+  ]
+}
+```
+
+The plan must have at least the number of scenarios requested by the brief,
+and every scenario must be held out, use the same task family, and contain a
+prompt. The source checkout must be clean for a real run. Use a dry run first:
+
+```bash
+codex debug agent-improvement evolve evaluate experiment_<ID> \
+  --briefs /private/tmp/experiment-briefs.json \
+  --plan /private/tmp/parser-held-out-plan.json \
+  --store "$CODEX_HOME/agent-improvement" \
+  --run-root /private/tmp/codex-live-evaluations \
+  --output /private/tmp/parser-evaluation-results.json \
+  --dry-run
+```
+
+After reviewing the printed execution contract, remove `--dry-run` to run
+baseline and treatment from the same commit in separate detached worktrees.
+The child runs use the `workspace-write` sandbox, `approval_policy=never`,
+ephemeral sessions, isolated trace/state roots, and a per-scenario wall-time
+cap. The treatment receives a copy of the active card store; the source
+workspace scope is preserved so retrieval remains comparable. Trace size,
+token, tool-call, and terminal-operation budgets are enforced by the existing
+evaluator after each run. Successful runs clean up their worktrees; add
+`--keep-worktrees` when investigating a failed study.
+
+The output is a redacted aggregate result suitable for the offline evaluator.
+It does not contain prompts, paths, command tokens, or raw model output. To
+record the derived outcome in the brief history, only after inspecting the
+result, add `--record-outcome --actor <ACTOR>`. This records measured task or
+verification deltas; it does not infer that a recommendation was followed.
+Model authentication, network access, runtime, and cost are inherited from the
+operator's Codex environment, so start with a small held-out set.
+
 ## Review card adoption
 
 When a selected card is shown to the model, Codex records a bounded exposure

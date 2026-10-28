@@ -7,6 +7,7 @@ use codex_agent_improvement_extension::CandidateTrigger;
 use codex_agent_improvement_extension::EVALUATION_MANIFEST_SCHEMA_VERSION;
 use codex_agent_improvement_extension::EVALUATION_RESULT_SCHEMA_VERSION;
 use codex_agent_improvement_extension::EvaluationAggregate;
+use codex_agent_improvement_extension::EvaluationBudget;
 use codex_agent_improvement_extension::EvaluationCondition;
 use codex_agent_improvement_extension::EvaluationConditionProvenance;
 use codex_agent_improvement_extension::EvaluationConditionResult;
@@ -27,6 +28,8 @@ use codex_agent_improvement_extension::EvaluatorStatus;
 use codex_agent_improvement_extension::ExperienceCandidate;
 use codex_agent_improvement_extension::ExperienceCard;
 use codex_agent_improvement_extension::FailureClass;
+use codex_agent_improvement_extension::LiveEvaluationPlan;
+use codex_agent_improvement_extension::LiveEvaluationScenario;
 use codex_agent_improvement_extension::MetricDelta;
 use codex_agent_improvement_extension::TaskFamily;
 use codex_agent_improvement_extension::append_candidate;
@@ -1036,5 +1039,113 @@ fn evolve_command_runs_records_maintains_exports_and_forgets_explicitly() -> Res
     let forgotten: Value = serde_json::from_slice(&output.stdout)?;
     assert_eq!(forgotten["removed_card_ids"][0], card.card_id);
     assert!(std::fs::read_to_string(&archive_path)?.contains("trace-evolve-cli"));
+    Ok(())
+}
+
+#[test]
+fn evolve_evaluate_dry_run_validates_a_private_held_out_plan() -> Result<()> {
+    let home = TempDir::new()?;
+    let store = TempDir::new()?;
+    let mut card = ExperienceCard::new(
+        "trace-live-plan-cli",
+        current_unix_ms(),
+        TaskFamily::Coding,
+        FailureClass::CommandFailure,
+        AgentImprovementEvidence::default(),
+        Vec::new(),
+        "reproduce the first failing command",
+        Vec::new(),
+    );
+    card.recurrence.count = 3;
+    append_card(store.path(), &card)?;
+
+    let report_path = store.path().join("briefs.json");
+    let mut run = codex_command(home.path())?;
+    let output = run
+        .args([
+            "debug",
+            "agent-improvement",
+            "evolve",
+            "run",
+            "--store",
+            store.path().to_str().expect("UTF-8 store path"),
+            "--output",
+            report_path.to_str().expect("UTF-8 report path"),
+        ])
+        .output()?;
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let report: Value = serde_json::from_slice(&output.stdout)?;
+    let brief = report["briefs"].as_array().expect("brief array")[0].clone();
+    let brief_id = brief["brief_id"].as_str().expect("brief ID").to_string();
+    let brief_fingerprint = brief["fingerprint"]
+        .as_str()
+        .expect("brief fingerprint")
+        .to_string();
+    let plan = LiveEvaluationPlan {
+        schema_version: codex_agent_improvement_extension::LIVE_EVALUATION_PLAN_SCHEMA_VERSION,
+        plan_id: "plan-live-cli".to_string(),
+        brief_id,
+        brief_fingerprint,
+        primary_checkout: home.path().to_path_buf(),
+        scenarios: (0..2)
+            .map(|index| LiveEvaluationScenario {
+                scenario_id: format!("live-scenario-{index}"),
+                task_family: TaskFamily::Coding,
+                split: EvaluationSplit::HeldOut,
+                task: EvaluationTask {
+                    task_id: format!("live-task-{index}"),
+                    prompt: Some("fix the bounded fixture".to_string()),
+                    reference: None,
+                    fingerprint: format!("live-task-fingerprint-{index}"),
+                },
+                evaluator: EvaluatorSpec {
+                    kind: EvaluatorKind::TraceOutcome,
+                    checks: Vec::new(),
+                    require_all_checks: true,
+                },
+                budget: EvaluationBudget::default(),
+            })
+            .collect(),
+    };
+    let plan_path = store.path().join("live-plan.json");
+    std::fs::write(&plan_path, serde_json::to_vec_pretty(&plan)?)?;
+    let output_path = store.path().join("live-results.json");
+    let run_root = store.path().join("live-runs");
+
+    let mut evaluate = codex_command(home.path())?;
+    let output = evaluate
+        .args([
+            "debug",
+            "agent-improvement",
+            "evolve",
+            "evaluate",
+            plan.brief_id.as_str(),
+            "--briefs",
+            report_path.to_str().expect("UTF-8 report path"),
+            "--plan",
+            plan_path.to_str().expect("UTF-8 plan path"),
+            "--store",
+            store.path().to_str().expect("UTF-8 store path"),
+            "--run-root",
+            run_root.to_str().expect("UTF-8 run root"),
+            "--output",
+            output_path.to_str().expect("UTF-8 output path"),
+            "--dry-run",
+        ])
+        .output()?;
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let dry_run: Value = serde_json::from_slice(&output.stdout)?;
+    assert_eq!(dry_run["dry_run"], true);
+    assert_eq!(dry_run["scenario_count"], 2);
+    assert!(!run_root.exists());
+    assert!(!output_path.exists());
     Ok(())
 }

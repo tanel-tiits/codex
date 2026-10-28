@@ -101,6 +101,13 @@ candidates.
    `--apply`, archive-backed compaction, export, or explicit `forget` when the
    user has asked for that maintenance operation.
 
+10. When a brief has a concrete held-out task set, prepare the private
+    Milestone 8a evaluation plan and run the bridge only after the user asks
+    for a live evaluation. Keep prompts, checkout paths, and task references
+    private; run `evolve evaluate --dry-run` first, then inspect the redacted
+    result before recording an outcome. Never treat a live result as permission
+    to accept or promote a card.
+
 ## Boundaries
 
 - Never accept a candidate silently or in bulk without explicit user approval.
@@ -109,6 +116,10 @@ candidates.
   workflow. Emit diffs for review only.
 - Never promote a proposal without a held-out evaluation result and separate
   human acceptance. Non-card lanes remain normal diff-review artifacts.
+- Never launch a live evaluation without an explicit user request, a private
+  held-out plan, and a successful dry run. The live bridge is bounded and
+  isolated, but it can consume model/tool budget and inherit the operator's
+  credentials and network access.
 - Never draft from raw prompts, model responses, terminal output, secrets, or
   filesystem paths. Use only bounded cards and opaque evidence identifiers.
 - Never treat a structural validation pass as an evaluation result. A

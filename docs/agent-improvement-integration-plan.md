@@ -1,7 +1,7 @@
 # Agent Improvement Integration Plan
 
-Status: Milestone 7 slow-loop aggregation and maintenance complete;
-Milestones 1–6 complete; live model-runner execution and Milestone 8 remain
+Status: Milestone 8a bounded live evaluation bridge complete;
+Milestones 1–7 complete; full program-level evolution and transfer remain
 gated
 
 ## Objective
@@ -86,12 +86,13 @@ privacy, provenance, rollback, and human-review boundaries.
 
 ## Roadmap and milestones
 
-Milestones 1–7 are implemented in this working tree. Milestone 4 intentionally
-lands as an offline replay/evaluation core: it consumes matched artifacts
-produced by separately controlled baseline and treatment runs. Launching live
-model runs from the evaluator remains a separately gated safety increment. The
-remaining milestones are ordered by the
-dependency that makes each new form of autonomy safe and measurable. A
+Milestones 1–7 and the bounded Milestone 8a bridge are implemented in this
+working tree. Milestone 4 intentionally lands as an offline replay/evaluation
+core: it consumes matched artifacts produced by separately controlled baseline
+and treatment runs. Milestone 8a adds an explicitly manual bridge that can
+produce those artifacts in isolated worktrees, but it does not promote a
+result or change live Codex behavior. The remaining milestones are ordered by
+the dependency that makes each new form of autonomy safe and measurable. A
 milestone is not considered complete merely because its code exists; its exit
 gate and regression evidence must also be satisfied.
 
@@ -100,11 +101,12 @@ gate and regression evidence must also be satisfied.
 | 1. Safe local experience foundation | Deterministic, privacy-bounded cards can be created explicitly and retrieved as advisory context | Essential | Existing trace and extension systems | Complete |
 | 2. Automatic candidate capture and review | Long sessions produce reviewable candidates without requiring a manual CLI step; nothing is promoted automatically | Immediately next | 1 | Complete |
 | 3. Evidence-rich lessons and retrieval | Cards describe recurring failure signatures, interventions, outcomes, scope, and confidence rather than only coarse summaries | High value | 2 | Complete |
-| 4. Replay and evaluation harness | Baseline versus memory-assisted artifacts can be measured on paired and held-out tasks with bounded provenance and cost accounting | Essential before autonomy | 2–3 | Offline core complete; live runner gated |
+| 4. Replay and evaluation harness | Baseline versus memory-assisted artifacts can be measured on paired and held-out tasks with bounded provenance and cost accounting | Essential before autonomy | 2–3 | Offline core complete; live bridge added in 8a |
 | 5. Offline proposer and candidate artifacts | A focused Skill and deterministic offline command can produce evidence-linked, review-only proposals for cards and bounded guidance/tooling changes | High value | 3–4 | Review-only core complete; live model proposer gated |
 | 6. Promotion, rollback, and policy control plane | Candidate changes become versioned, scoped, reversible active knowledge only after evidence and review | Essential | 4–5 | Complete; manual promotion only |
 | 7. Slow loop for long-horizon improvement | Periodic analysis finds recurring patterns, stale knowledge, and missed evidence, then proposes the next experiments | High value / research | 4–6 | Complete; deterministic/manual loop |
-| 8. Optional program-level evolution and transfer | Isolated evolution of skills, prompts, or extension policy can be explored across task families without mutating the live agent | Research only | 6–7 | Planned |
+| 8a. Bounded live evaluation and feedback bridge | Run a private held-out brief in paired isolated worktrees, produce a redacted result, and optionally record one explicit outcome | Essential before optional autonomy | 4–7 | Complete; opt-in/manual; no automatic promotion |
+| 8. Optional program-level evolution and transfer | Isolated evolution of skills, prompts, or extension policy can be explored across task families without mutating the live agent | Research only | 6–7 + 8a | Planned |
 
 ### Milestone 1 — Safe local experience foundation (complete)
 
@@ -514,7 +516,8 @@ complete manual lifecycle against a temporary store.
 ### Milestone 7 — Slow loop for long-horizon improvement (complete)
 
 **Implementation status: complete for the deterministic/manual local loop;
-model-backed proposing, live execution, and automatic promotion remain gated.**
+model-backed proposing and automatic promotion remain gated. Live execution is
+provided separately by Milestone 8a.**
 
 The extension now provides `codex debug agent-improvement evolve` operations
 that run outside turn preparation and consume only bounded local cards,
@@ -568,6 +571,61 @@ of scoped experiments with provenance, and repeated failed outcomes stop being
 re-proposed. Held-out outcome improvement is still required before describing
 any resulting card or proposal as learned.
 
+### Milestone 8a — Bounded live evaluation and feedback bridge (complete)
+
+**Implementation status: complete as an opt-in execution bridge; no behavioral
+gain is claimed until a user runs a real held-out study.**
+
+Milestone 8a connects the deterministic Milestone 7 briefs to the existing
+Milestone 4 evaluator. It closes the practical gap between “a brief describes
+an experiment” and “the same experiment can be run reproducibly,” while keeping
+the live path outside normal turn preparation.
+
+**Deliverables:**
+
+- A private, versioned live-plan contract containing held-out prompts or task
+  references, the brief ID and fingerprint, a clean primary checkout, bounded
+  evaluators, and per-scenario budgets. The plan is an operator input and must
+  not be published with aggregate results.
+- `codex debug agent-improvement evolve evaluate`, with `--dry-run` validation
+  before any child process is launched. The command accepts either one brief
+  or the JSON report from `evolve run`.
+- One baseline and one treatment run per selected scenario, each from the same
+  detached Git commit and in separate worktrees and trace roots. The baseline
+  has retrieval disabled; the treatment receives a private copy of the active
+  card store and preserves the source workspace scope while running in its
+  temporary worktree.
+- Explicit child-run controls: ephemeral execution, `workspace-write` sandbox,
+  `approval_policy=never`, capture disabled, a per-scenario wall-time cap, and
+  no automatic promotion. Trace, token, tool-call, and terminal-operation
+  budgets are enforced by the existing evaluator after each run. The bridge
+  does not bypass the sandbox or execute generated program changes outside
+  Codex's normal command path.
+- Reuse of the existing evaluator and redacted result writer, plus optional
+  append-only recording of the derived experiment outcome. Exposure is recorded
+  separately from adoption; recommendation-followed attribution remains
+  unknown unless a separate evidence workflow establishes it.
+
+The first operator workflow is:
+
+```text
+evolve run -> create private held-out plan -> evolve evaluate --dry-run
+           -> evolve evaluate -> inspect result -> human review/promotion
+```
+
+The bridge requires a clean source checkout for a real run, inherits the
+operator's model authentication and network availability, and may incur model
+and tool costs. It currently supports the deterministic trace-outcome and
+verification evaluators in the live path; human/model-judge labels remain
+private offline inputs. A dry run and the isolated runner contract are tested,
+but no live model execution is part of the repository test suite.
+
+**Exit gate:** complete for the bridge implementation: private plans are
+validated, paired execution is isolated, results are redacted and reusable by
+the existing evaluator, and promotion remains a separate human action. The
+research claim that a card improves Codex remains gated on a real historical
+benchmark, held-out gain, cost accounting, no safety regression, and rollback.
+
 ### Milestone 8 — Optional program-level evolution and transfer (research)
 
 **Intent:** explore the strongest Meta^n idea—evolving the agent harness or
@@ -591,10 +649,11 @@ automatic change to system/developer instructions, and no acceptance based on
 one benchmark or one judge score.
 
 **Exit gate:** this milestone is optional and should not be started merely
-because the machinery is available. It requires a historical benchmark,
+because the machinery is available. First use Milestone 8a to establish a
+repeatable live evaluation baseline. It then requires a historical benchmark,
 reproducible holdout gains, bounded compute/cost, no safety regression, a
 rollback demonstration, and explicit human approval of the evaluation and
-candidate scope. Otherwise the project should stop at Milestone 7.
+candidate scope. Otherwise the project should stop at Milestone 8a.
 
 ### Cross-milestone requirements
 
@@ -636,8 +695,13 @@ The practical implementation order is:
 5. Add Milestone 5 as a focused Skill first, then a model-backed offline
    proposer if the Skill workflow is valuable and safe.
 6. Implement Milestone 6 before enabling any non-manual promotion.
-7. Add Milestone 7 for periodic local improvement and stop there unless the
-   measured evidence justifies Milestone 8.
+7. Add Milestone 7 for periodic local improvement and keep the loop
+   deterministic/manual.
+8. Use Milestone 8a for a small, private held-out study: dry-run the plan,
+   run paired conditions, inspect the redacted result, and record the outcome
+   only after review.
+9. Consider Milestone 8 only if repeated Milestone 8a studies establish
+   transfer, cost, safety, and rollback evidence.
 
 The first useful product loop after the completed foundation is therefore:
 
@@ -984,8 +1048,8 @@ The focused validation completed with these results:
 
 - `cargo test -p codex-config agent_improvement`: 2 passed;
 - `cargo test -p codex-core --lib load_config_resolves_agent_improvement_settings`: 1 passed;
-- `cargo test -p codex-agent-improvement-extension`: 50 passed;
-- `cargo test -p codex-cli --test agent_improvement`: 6 passed;
+- `cargo test -p codex-agent-improvement-extension`: 73 passed;
+- `cargo test -p codex-cli --test agent_improvement`: 10 passed;
 - `cargo test -p codex-cli debug_agent_improvement`: 4 parser tests passed;
 - `cargo test -p codex-app-server extensions`: 6 unit tests and 2 filtered
   integration tests passed;
@@ -1028,6 +1092,15 @@ stale/negative/retention planning, archive-backed compaction, canonical export,
 explicit forgetting, and non-destructive retirement. The focused extension
 suite now has 70 tests and the CLI agent-improvement suite has 9 integration
 tests; the slow loop makes no model calls and cannot promote its own output.
+
+Milestone 8a additionally verifies the private held-out plan contract,
+brief/fingerprint matching, task-family and scenario-budget bounds, stable card
+and result fingerprints, CLI dry-run validation, clean-checkout and isolated
+worktree requirements in the live runner, and reuse of the redacted paired
+evaluator. The focused extension suite now has 73 tests and the CLI
+agent-improvement suite has 10 integration tests. The repository suite does not
+launch a live model or claim an improvement result; that remains an explicit
+operator study.
 
 An earlier broader `cargo test -p codex-core config` run compiled the target
 and then aborted in the unrelated existing
@@ -1091,3 +1164,6 @@ cross-task evidence.
 | 7.2 Experiment history and stagnation control | complete | Append-only `evolution-history.jsonl`, explicit outcomes, priority decay, and suppression after repeated failed attempts |
 | 7.3 Bounded card maintenance | complete | Stale/negative/retention planning, explicit retirement, archive-backed compaction, canonical export, and explicit forgetting |
 | 7.4 Evolve CLI and validation | complete | Run/record/maintain/export/forget commands, parser coverage, 70 extension tests, 9 CLI integration tests, and deterministic end-to-end coverage |
+| 8a.1 Private live-plan contract and fingerprints | complete | Held-out prompt/budget validation, brief matching, stable card/result fingerprints, and private path boundaries |
+| 8a.2 Paired isolated runner | complete | Same-commit baseline/treatment worktrees, isolated stores/traces, source-scope preservation, bounded child execution, and no automatic promotion |
+| 8a.3 Evaluator feedback bridge | complete | Redacted result reuse, optional evolution-history outcome recording, dry-run CLI coverage, 73 extension tests, and 10 CLI integration tests |

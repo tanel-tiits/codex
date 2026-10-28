@@ -1330,7 +1330,7 @@ fn maintenance_rank(
     )
 }
 
-fn validate_brief(brief: &ExperimentBrief) -> Result<()> {
+pub(crate) fn validate_brief(brief: &ExperimentBrief) -> Result<()> {
     ensure!(
         brief.schema_version == EVOLUTION_SCHEMA_VERSION,
         "unsupported evolution brief schema"
