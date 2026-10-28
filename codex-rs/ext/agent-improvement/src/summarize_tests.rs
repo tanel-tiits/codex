@@ -24,7 +24,10 @@ use codex_rollout_trace::ToolCallRequester;
 use codex_rollout_trace::ToolCallSummary;
 use pretty_assertions::assert_eq;
 
-use super::{FailureClass, TaskFamily, select_relevant, summarize_rollout};
+use super::{
+    ExitBucket, FailureClass, ObservedStep, OperationClass, TaskFamily, ToolFamily,
+    ToolchainFamily, VerificationState, select_relevant, summarize_rollout,
+};
 
 fn base_trace(status: RolloutStatus) -> RolloutTrace {
     let mut trace = RolloutTrace {
@@ -259,6 +262,18 @@ fn completed_test_trace_is_summarized_without_raw_output() {
     assert_eq!(card.evidence.turn_count, 1);
     assert_eq!(card.evidence.inference_count, 1);
     assert_eq!(card.evidence.verification_step_count, 1);
+    assert_eq!(card.evidence.verification_attempt_count, 1);
+    assert_eq!(card.evidence.failed_verification_count, 0);
+    assert_eq!(
+        card.evidence_profile.observed_sequence,
+        vec![
+            ObservedStep::Turn,
+            ObservedStep::Inference,
+            ObservedStep::Tool,
+            ObservedStep::TerminalOperation,
+            ObservedStep::VerificationAttempt,
+        ]
+    );
     assert_eq!(card.evidence.token_usage.input_tokens, 10);
     assert!(
         card.activity_labels
@@ -313,6 +328,17 @@ fn command_failure_is_distinguished_from_tool_and_model_failure() {
     assert_eq!(card.task_family, TaskFamily::Coding);
     assert_eq!(card.failure_class, FailureClass::CommandFailure);
     assert!(card.signals.iter().any(|signal| signal == "command_failed"));
+    assert_eq!(
+        card.failure_signature.operation_class,
+        OperationClass::Command
+    );
+    assert_eq!(card.failure_signature.tool_family, ToolFamily::ExecCommand);
+    assert_eq!(card.failure_signature.exit_bucket, ExitBucket::NonZero);
+    assert_eq!(card.scope.toolchain_family, Some(ToolchainFamily::Rust));
+    assert_eq!(
+        card.failure_signature.verification_state,
+        VerificationState::Unknown
+    );
 }
 
 #[test]

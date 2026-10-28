@@ -140,3 +140,34 @@ fn lifecycle_notifications_for_one_turn_share_one_candidate() {
         vec![turn_stop]
     );
 }
+
+#[test]
+fn candidate_loader_migrates_legacy_embedded_cards() {
+    let directory = tempdir().expect("temporary candidate directory");
+    let candidate = candidate("trace-legacy-candidate");
+    let mut legacy = serde_json::to_value(&candidate).expect("serialize candidate");
+    legacy["card"]["schema_version"] = serde_json::json!(1);
+    for field in [
+        "lesson_id",
+        "source_trace_ids",
+        "status",
+        "scope",
+        "failure_signature",
+        "evidence_profile",
+        "confidence",
+        "recurrence",
+        "adoption",
+    ] {
+        legacy["card"]
+            .as_object_mut()
+            .expect("legacy card object")
+            .remove(field);
+    }
+    std::fs::write(candidates_path(directory.path()), format!("{}\n", legacy))
+        .expect("write legacy candidate");
+
+    let loaded = load_candidates(directory.path()).expect("load migrated candidate");
+    assert_eq!(loaded.len(), 1);
+    assert_eq!(loaded[0].card.schema_version, 2);
+    assert!(loaded[0].is_bounded());
+}

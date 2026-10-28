@@ -53,8 +53,13 @@ pub fn load_candidates(root: &Path) -> io::Result<Vec<ExperienceCandidate>> {
             continue;
         }
         records_seen += 1;
-        match from_str::<ExperienceCandidate>(&line) {
-            Ok(candidate) if candidate.is_bounded() => {
+        match from_str::<ExperienceCandidate>(&line)
+            .ok()
+            .and_then(|mut candidate| {
+                candidate.card = candidate.card.normalize_for_load()?;
+                Some(candidate)
+            }) {
+            Some(candidate) if candidate.is_bounded() => {
                 if candidates.len() < MAX_LOADED_CANDIDATES
                     || candidates.contains_key(&candidate.candidate_id)
                 {
@@ -63,7 +68,7 @@ pub fn load_candidates(root: &Path) -> io::Result<Vec<ExperienceCandidate>> {
                     skipped_count = skipped_count.saturating_add(1);
                 }
             }
-            Ok(_) | Err(_) => skipped_count = skipped_count.saturating_add(1),
+            Some(_) | None => skipped_count = skipped_count.saturating_add(1),
         }
     }
 

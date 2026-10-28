@@ -3,13 +3,18 @@ use clap::CommandFactory;
 use clap::Parser;
 use clap_complete::Shell;
 use clap_complete::generate;
+use codex_agent_improvement_extension::AttributionState;
 use codex_agent_improvement_extension::CandidateStatus;
 use codex_agent_improvement_extension::ExperienceCandidate;
+use codex_agent_improvement_extension::FeedbackState;
 use codex_agent_improvement_extension::append_card;
 use codex_agent_improvement_extension::find_candidate;
 use codex_agent_improvement_extension::load_candidates;
 use codex_agent_improvement_extension::load_cards;
+use codex_agent_improvement_extension::record_card_feedback;
+use codex_agent_improvement_extension::record_card_outcome;
 use codex_agent_improvement_extension::render_cards;
+use codex_agent_improvement_extension::retire_card;
 use codex_agent_improvement_extension::select_relevant;
 use codex_agent_improvement_extension::summarize_rollout;
 use codex_agent_improvement_extension::update_candidate_status;
@@ -347,6 +352,9 @@ enum DebugAgentImprovementSubcommand {
 
     /// Review automatically captured candidates before they become active cards.
     Candidates(DebugAgentImprovementCandidatesCommand),
+
+    /// Manage active lesson lifecycle and adoption metadata.
+    Cards(DebugAgentImprovementCardsCommand),
 }
 
 #[derive(Debug, Parser)]
@@ -387,6 +395,69 @@ struct DebugAgentImprovementRenderCommand {
 struct DebugAgentImprovementCandidatesCommand {
     #[command(subcommand)]
     subcommand: DebugAgentImprovementCandidatesSubcommand,
+}
+
+#[derive(Debug, Parser)]
+struct DebugAgentImprovementCardsCommand {
+    #[command(subcommand)]
+    subcommand: DebugAgentImprovementCardsSubcommand,
+}
+
+#[derive(Debug, clap::Subcommand)]
+enum DebugAgentImprovementCardsSubcommand {
+    /// Retire a card so it remains auditable but is no longer retrieved.
+    Retire(DebugAgentImprovementCardIdCommand),
+
+    /// Record explicit feedback about a card's usefulness.
+    Feedback(DebugAgentImprovementCardFeedbackCommand),
+
+    /// Record descriptive followed/verified attribution for a card.
+    Outcome(DebugAgentImprovementCardOutcomeCommand),
+}
+
+#[derive(Debug, Parser)]
+struct DebugAgentImprovementCardIdCommand {
+    /// Experience-card store directory containing cards.jsonl.
+    #[arg(long = "store", value_name = "DIR", required = true)]
+    store: PathBuf,
+
+    /// Stable card ID returned by summarize, render data, or a candidate.
+    #[arg(value_name = "CARD_ID")]
+    card_id: String,
+}
+
+#[derive(Debug, Parser)]
+struct DebugAgentImprovementCardFeedbackCommand {
+    /// Experience-card store directory containing cards.jsonl.
+    #[arg(long = "store", value_name = "DIR", required = true)]
+    store: PathBuf,
+
+    /// Stable card ID returned by summarize, render data, or a candidate.
+    #[arg(value_name = "CARD_ID")]
+    card_id: String,
+
+    /// Feedback value: positive, negative, mixed, or unknown.
+    #[arg(long = "value", value_name = "VALUE", required = true)]
+    value: String,
+}
+
+#[derive(Debug, Parser)]
+struct DebugAgentImprovementCardOutcomeCommand {
+    /// Experience-card store directory containing cards.jsonl.
+    #[arg(long = "store", value_name = "DIR", required = true)]
+    store: PathBuf,
+
+    /// Stable card ID returned by summarize, render data, or a candidate.
+    #[arg(value_name = "CARD_ID")]
+    card_id: String,
+
+    /// Whether the recommendation was followed: yes, no, mixed, or unknown.
+    #[arg(long = "followed", value_name = "VALUE", required = true)]
+    followed: String,
+
+    /// Whether the resulting work was verified: yes, no, mixed, or unknown.
+    #[arg(long = "verified", value_name = "VALUE", required = true)]
+    verified: String,
 }
 
 #[derive(Debug, clap::Subcommand)]
@@ -1976,6 +2047,9 @@ async fn cli_main(
                     DebugAgentImprovementSubcommand::Candidates(cmd) => {
                         run_debug_agent_improvement_candidates_command(cmd)?;
                     }
+                    DebugAgentImprovementSubcommand::Cards(cmd) => {
+                        run_debug_agent_improvement_cards_command(cmd)?;
+                    }
                 }
             }
             DebugSubcommand::TraceReduce(cmd) => {
@@ -2273,6 +2347,66 @@ fn run_debug_agent_improvement_candidates_command(
                 update_candidate_status(&cmd.store, &cmd.candidate_id, CandidateStatus::Rejected)?
                     .ok_or_else(|| anyhow::anyhow!("candidate disappeared during rejection"))?;
             println!("{}", serde_json::to_string_pretty(&rejected)?);
+        }
+    }
+    Ok(())
+}
+
+fn run_debug_agent_improvement_cards_command(
+    cmd: DebugAgentImprovementCardsCommand,
+) -> anyhow::Result<()> {
+    match cmd.subcommand {
+        DebugAgentImprovementCardsSubcommand::Retire(cmd) => {
+            retire_card(&cmd.store, &cmd.card_id)?;
+            let card = load_cards(&cmd.store)?
+                .into_iter()
+                .find(|card| card.card_id == cmd.card_id)
+                .ok_or_else(|| {
+                    anyhow::anyhow!("agent-improvement card not found: {}", cmd.card_id)
+                })?;
+            println!("{}", serde_json::to_string_pretty(&card)?);
+        }
+        DebugAgentImprovementCardsSubcommand::Feedback(cmd) => {
+            let feedback = FeedbackState::parse(&cmd.value).ok_or_else(|| {
+                anyhow::anyhow!(
+                    "invalid card feedback {:?}; expected positive, negative, mixed, or unknown",
+                    cmd.value
+                )
+            })?;
+            if !record_card_feedback(&cmd.store, &cmd.card_id, feedback)? {
+                anyhow::bail!("agent-improvement card not found: {}", cmd.card_id);
+            }
+            let card = load_cards(&cmd.store)?
+                .into_iter()
+                .find(|card| card.card_id == cmd.card_id)
+                .ok_or_else(|| {
+                    anyhow::anyhow!("agent-improvement card disappeared: {}", cmd.card_id)
+                })?;
+            println!("{}", serde_json::to_string_pretty(&card)?);
+        }
+        DebugAgentImprovementCardsSubcommand::Outcome(cmd) => {
+            let followed = AttributionState::parse(&cmd.followed).ok_or_else(|| {
+                anyhow::anyhow!(
+                    "invalid followed attribution {:?}; expected yes, no, mixed, or unknown",
+                    cmd.followed
+                )
+            })?;
+            let verified = AttributionState::parse(&cmd.verified).ok_or_else(|| {
+                anyhow::anyhow!(
+                    "invalid verified attribution {:?}; expected yes, no, mixed, or unknown",
+                    cmd.verified
+                )
+            })?;
+            if !record_card_outcome(&cmd.store, &cmd.card_id, followed, verified)? {
+                anyhow::bail!("agent-improvement card not found: {}", cmd.card_id);
+            }
+            let card = load_cards(&cmd.store)?
+                .into_iter()
+                .find(|card| card.card_id == cmd.card_id)
+                .ok_or_else(|| {
+                    anyhow::anyhow!("agent-improvement card disappeared: {}", cmd.card_id)
+                })?;
+            println!("{}", serde_json::to_string_pretty(&card)?);
         }
     }
     Ok(())

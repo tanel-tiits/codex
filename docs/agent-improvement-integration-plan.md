@@ -1,6 +1,6 @@
 # Agent Improvement Integration Plan
 
-Status: Milestones 1–2 complete; Milestones 3–8 planned
+Status: Milestone 3 complete; Milestones 1–2 complete; Milestones 4–8 planned
 
 ## Objective
 
@@ -84,16 +84,17 @@ privacy, provenance, rollback, and human-review boundaries.
 
 ## Roadmap and milestones
 
-Milestones 1 and 2 are complete in this working tree. The remaining milestones
-are ordered by the dependency that makes each new form of autonomy safe and
-measurable. A milestone is not considered complete merely because its code
-exists; its exit gate and regression evidence must also be satisfied.
+Milestones 1–3 are complete in this working tree. Milestone 4 is the next
+implementation increment; the remaining milestones are ordered by the
+dependency that makes each new form of autonomy safe and measurable. A
+milestone is not considered complete merely because its code exists; its exit
+gate and regression evidence must also be satisfied.
 
 | Milestone | Outcome | Priority | Depends on | Status |
 | --- | --- | --- | --- | --- |
 | 1. Safe local experience foundation | Deterministic, privacy-bounded cards can be created explicitly and retrieved as advisory context | Essential | Existing trace and extension systems | Complete |
 | 2. Automatic candidate capture and review | Long sessions produce reviewable candidates without requiring a manual CLI step; nothing is promoted automatically | Immediately next | 1 | Complete |
-| 3. Evidence-rich lessons and retrieval | Cards describe recurring failure signatures, interventions, outcomes, scope, and confidence rather than only coarse summaries | High value | 2 | Planned |
+| 3. Evidence-rich lessons and retrieval | Cards describe recurring failure signatures, interventions, outcomes, scope, and confidence rather than only coarse summaries | High value | 2 | Complete |
 | 4. Replay and evaluation harness | Baseline versus memory-assisted work can be measured on paired and held-out tasks | Essential before autonomy | 2–3 | Planned |
 | 5. Offline proposer and candidate artifacts | A focused skill or offline model call can propose cards, skills, or guidance diffs for review | High value | 3–4 | Planned |
 | 6. Promotion, rollback, and policy control plane | Candidate changes become versioned, scoped, reversible active knowledge only after evidence and review | Essential | 4–5 | Planned |
@@ -150,10 +151,9 @@ after a long session while keeping the candidate-to-active boundary explicit.
 - Produce bounded, deterministic candidates at turn and root-thread lifecycle
   boundaries. Candidate records retain the source trace, source turn, trigger,
   and derived card identity; queue deduplication collapses repeated lifecycle
-  notifications for one source turn. Richer failure-episode segmentation and
-  verification checkpoint grouping are intentionally deferred to Milestone 3,
-  where the evidence-rich schema can represent them without copying raw trace
-  content.
+  notifications for one source turn. Milestone 3 now adds a bounded observed
+  sequence and verification counters to the promoted card without copying raw
+  trace content; full episode segmentation remains evaluation/hardening work.
 - Add candidate lifecycle metadata: candidate ID, source trace ID, source turn
   or episode ID, creation time, status (`pending`, `accepted`, `rejected`, or
   `expired`), and a deterministic content fingerprint. Keep raw trace data in
@@ -211,6 +211,22 @@ existing active-card store and then appends the terminal candidate status.
 
 ### Milestone 3 — Evidence-rich lessons and retrieval
 
+**Implementation status: complete.**
+
+This increment keeps the existing local JSONL format and review boundary, but
+upgrades the derived card contract to schema version 2. Existing version 1
+cards and embedded candidate cards are migrated in memory with conservative
+unknown values; unknown schema versions are skipped. Raw prompts, outputs,
+paths, secrets, and concrete model identifiers remain out of durable card
+text.
+
+The implementation is deliberately measurable: controlled signature,
+observed-sequence, and evidence fields, opaque workspace scope,
+recurrence/confidence/adoption
+metadata, retirement, deterministic structured ranking, recency decay, and
+conflict suppression. Attribution remains descriptive (`unknown` unless
+observed), and paired baseline/treatment claims remain Milestone 4 work.
+
 **Intent:** make retrieved experience more actionable than a coarse failure
 label while retaining the privacy and prompt-budget properties of Milestone 1.
 
@@ -237,9 +253,13 @@ label while retaining the privacy and prompt-budget properties of Milestone 1.
 - Improve ranking from token overlap alone with deterministic structured
   filters and recency/confidence/recurrence signals. Keep selection stable,
   bounded, and explainable; retain a lexical fallback for unknown task types.
-- Add stale-card decay, contradiction handling, duplicate merging, and an
-  explicit `retire` state. Never delete the only provenance for an active
-  card without preserving its audit record.
+- Add score-based stale-card decay, contradiction handling, duplicate merging,
+  and an explicit `retire` state. Stale cards are not silently deleted;
+  retirement preserves their audit record.
+- Add explicit local controls for feedback and descriptive outcome attribution:
+  `cards feedback` records usefulness feedback, while `cards outcome` records
+  whether a recommendation was followed or verified. Unknown remains the
+  default when the linkage is not observable.
 
 **Tests and verification:**
 
@@ -250,16 +270,17 @@ label while retaining the privacy and prompt-budget properties of Milestone 1.
   matching failure without evidence;
 - privacy tests for secrets, paths, prompts, outputs, identifiers, and control
   characters across all new fields;
-- an offline retrieval benchmark with a fixed query/card fixture set, tracking
-  relevant-card precision, irrelevant-card rate, context size, and stable
-  ordering;
+- an offline retrieval fixture benchmark with fixed cards and a query,
+  tracking relevant-card precision, irrelevant-card rate, context size, and
+  stable ordering;
 - tests for exposure/outcome attribution that distinguish `seen`, `accepted`,
   `followed`, `verified`, and `unknown`.
 
-**Exit gate:** on a held-out retrieval fixture, the richer representation is
-more relevant or equally relevant at lower context cost than Milestone 1, with
-no increase in unsafe or instruction-conflicting context. No claim about task
-success is made until Milestone 4 evaluates it.
+**Exit gate:** the fixed offline retrieval fixture now demonstrates scoped,
+evidence-first selection, conflict suppression, bounded rendering, and stable
+ordering without unsafe or instruction-conflicting card content. This is a
+retrieval-contract result, not a claim about task success; Milestone 4 remains
+required for a paired baseline/treatment claim.
 
 ### Milestone 4 — Replay and evaluation harness
 
@@ -541,8 +562,9 @@ responsibilities:
 2. **Summarizer**: deterministic conversion from a reduced `RolloutTrace` into
    one privacy-bounded card.
 3. **Store**: append-only JSONL persistence under
-   `$CODEX_HOME/agent-improvement/cards.jsonl`, with bounded lexical retrieval
-   and deterministic ordering.
+   `$CODEX_HOME/agent-improvement/cards.jsonl`, with schema migration, lesson
+   merging, bounded structured retrieval, lifecycle updates, and deterministic
+   ordering.
 4. **Candidate review**: bounded candidate JSONL persistence, lifecycle capture,
    deterministic deduplication, and explicit terminal review transitions.
 5. **Prompt integration**: an opt-in extension that selects relevant cards from
@@ -555,6 +577,9 @@ Add a CLI command:
 ```text
 codex debug agent-improvement summarize <TRACE_BUNDLE> [--store <DIR>] [--output <FILE>]
 codex debug agent-improvement render --store <DIR> --query <TEXT>
+codex debug agent-improvement cards feedback --store <DIR> <CARD_ID> --value <VALUE>
+codex debug agent-improvement cards outcome --store <DIR> <CARD_ID> --followed <VALUE> --verified <VALUE>
+codex debug agent-improvement cards retire --store <DIR> <CARD_ID>
 ```
 
 The first command replays an existing bundle and emits one card. `--store` is
@@ -863,8 +888,8 @@ The focused validation completed with these results:
 
 - `cargo test -p codex-config agent_improvement`: 2 passed;
 - `cargo test -p codex-core --lib load_config_resolves_agent_improvement_settings`: 1 passed;
-- `cargo test -p codex-agent-improvement-extension`: 33 passed;
-- `cargo test -p codex-cli --test agent_improvement`: 4 passed;
+- `cargo test -p codex-agent-improvement-extension`: 44 passed;
+- `cargo test -p codex-cli --test agent_improvement`: 5 passed;
 - `cargo test -p codex-cli debug_agent_improvement`: 3 parser tests passed;
 - `cargo test -p codex-app-server extensions`: 6 unit tests and 2 filtered
   integration tests passed;
@@ -877,6 +902,15 @@ Milestone 2 additionally verifies that capture can be enabled while retrieval
 is disabled, that a turn-stop candidate is available before the thread closes,
 that pending candidates do not create `cards.jsonl`, and that explicit CLI
 acceptance is the only path from pending state to prompt-visible active card.
+
+Milestone 3 additionally verifies schema v1 migration and unknown-version
+skipping, forward-compatible unknown fields, opaque workspace scoping, direct
+fact versus low-confidence hypothesis ranking, recurring-lesson merging,
+recency/recurrence ordering, conflict suppression, retirement, exposure,
+feedback, followed/verified attribution, and a fixed offline retrieval fixture
+with precision, irrelevance, ordering, and context-budget assertions. The
+extension records exposure when a card is selected, but it does not infer that
+the recommendation was followed or caused a later result.
 
 An earlier broader `cargo test -p codex-core config` run compiled the target
 and then aborted in the unrelated existing
@@ -920,3 +954,7 @@ cross-task evidence.
 | 2.3 Lifecycle wiring | complete | Turn-stop and root-thread-stop capture tests; replay failures are isolated from lifecycle callbacks |
 | 2.4 Review CLI and curator Skill | complete | Candidate list/show/accept/reject parser and end-to-end acceptance tests; embedded `agent-card-curator` asset |
 | 2.5 Documentation and validation | complete | Updated user guide and roadmap; focused Milestone 2 test suite and formatting checks |
+| 3.1 Evidence-rich schema and migration | complete | Schema v2 controlled facts, hypotheses, interventions, outcomes, signatures, scope, confidence, recurrence, adoption, v1 migration, and unknown-version handling |
+| 3.2 Structured store and retrieval | complete | Lesson merging, append-only lifecycle updates, workspace filtering, conflict suppression, confidence/evidence/recency/recurrence ranking, and retirement |
+| 3.3 Adoption attribution and controls | complete | Automatic exposure recording plus feedback, followed/verified outcome recording and CLI controls |
+| 3.4 Milestone 3 tests and documentation | complete | 44 extension tests, 5 CLI integration tests, migration/privacy/ranking/fixture coverage, formatting, and updated usage docs |

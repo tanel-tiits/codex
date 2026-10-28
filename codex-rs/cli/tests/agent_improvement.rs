@@ -86,7 +86,7 @@ fn summarize_command_is_json_and_persistence_is_explicit() -> Result<()> {
     let stdout_card: Value = serde_json::from_slice(&output.stdout)?;
     let file_card: Value = serde_json::from_slice(&std::fs::read(&card_output)?)?;
     assert_eq!(stdout_card, file_card);
-    assert_eq!(stdout_card["schema_version"], 1);
+    assert_eq!(stdout_card["schema_version"], 2);
     assert_eq!(stdout_card["failure_class"], "completed");
 
     let mut persisted = codex_command(home.path())?;
@@ -325,5 +325,91 @@ fn candidate_rejection_keeps_the_card_inactive() -> Result<()> {
     assert_eq!(all[0]["candidate_id"], candidate_id);
     assert_eq!(all[0]["status"], "rejected");
 
+    Ok(())
+}
+
+#[test]
+fn card_lifecycle_commands_record_adoption_and_retirement() -> Result<()> {
+    let home = TempDir::new()?;
+    let store = home.path().join("agent-improvement");
+    let card = ExperienceCard::new(
+        "trace-card-lifecycle-cli",
+        100,
+        TaskFamily::Coding,
+        FailureClass::CommandFailure,
+        AgentImprovementEvidence::default(),
+        vec!["parser_failure".to_string()],
+        "Reproduce the first failing parser command.",
+        vec!["reproduce_first_failing_command".to_string()],
+    );
+    let card_id = card.card_id.clone();
+    append_card(&store, &card)?;
+
+    let mut feedback = codex_command(home.path())?;
+    let output = feedback
+        .args([
+            "debug",
+            "agent-improvement",
+            "cards",
+            "feedback",
+            "--store",
+            store.to_str().expect("UTF-8 store path"),
+            &card_id,
+            "--value",
+            "positive",
+        ])
+        .output()?;
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let feedback_card: Value = serde_json::from_slice(&output.stdout)?;
+    assert_eq!(feedback_card["adoption"]["feedback"], "positive");
+
+    let mut outcome = codex_command(home.path())?;
+    let output = outcome
+        .args([
+            "debug",
+            "agent-improvement",
+            "cards",
+            "outcome",
+            "--store",
+            store.to_str().expect("UTF-8 store path"),
+            &card_id,
+            "--followed",
+            "yes",
+            "--verified",
+            "yes",
+        ])
+        .output()?;
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let outcome_card: Value = serde_json::from_slice(&output.stdout)?;
+    assert_eq!(outcome_card["adoption"]["followed"], "yes");
+    assert_eq!(outcome_card["adoption"]["verified"], "yes");
+
+    let mut retire = codex_command(home.path())?;
+    let output = retire
+        .args([
+            "debug",
+            "agent-improvement",
+            "cards",
+            "retire",
+            "--store",
+            store.to_str().expect("UTF-8 store path"),
+            &card_id,
+        ])
+        .output()?;
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let retired_card: Value = serde_json::from_slice(&output.stdout)?;
+    assert_eq!(retired_card["status"], "retired");
     Ok(())
 }

@@ -23,11 +23,13 @@ use codex_protocol::user_input::UserInput;
 use codex_rollout_trace::ThreadTraceContext;
 
 use crate::CandidateTrigger;
+use crate::ExperienceRetrievalContext;
 use crate::capture::CandidateCaptureOutcome;
 use crate::capture::capture_candidate_from_bundle;
 use crate::load_cards;
+use crate::record_card_exposure;
 use crate::render_cards;
-use crate::select_relevant;
+use crate::select_relevant_with_context;
 
 const EXPERIENCE_CONTEXT_KEY: &str = "agent_experience";
 const ADVISORY_CONTEXT_PREFIX: &str = "\
@@ -71,6 +73,7 @@ impl AgentImprovementExtension {
         &self,
         config: &AgentImprovementExtensionConfig,
         query: &str,
+        workspace_path: Option<&str>,
     ) -> Vec<Box<dyn ContextualUserFragment + Send>> {
         if !config.enabled || query.trim().is_empty() {
             return Vec::new();
@@ -86,10 +89,23 @@ impl AgentImprovementExtension {
                 return Vec::new();
             }
         };
-        let selected = select_relevant(&cards, query, config.max_cards);
+        let retrieval_context = ExperienceRetrievalContext::from_query(query, workspace_path);
+        let selected =
+            select_relevant_with_context(&cards, query, &retrieval_context, config.max_cards);
         if selected.is_empty() {
             return Vec::new();
         }
+
+        let root = config.root.clone();
+        let selected_ids = selected
+            .iter()
+            .map(|card| card.card_id.clone())
+            .collect::<Vec<_>>();
+        tokio::task::spawn_blocking(move || {
+            if let Err(error) = record_card_exposure(&root, &selected_ids) {
+                tracing::debug!(error = %error, "could not record agent-improvement card exposure");
+            }
+        });
 
         let rendered = render_cards(&selected, config.max_context_tokens);
         if rendered.trim().is_empty() {
@@ -178,7 +194,13 @@ impl TurnInputContributor for AgentImprovementExtension {
                 })
                 .collect::<Vec<_>>()
                 .join("\n");
-            self.contribute_for_query(&config, &query)
+            let workspace_path = input
+                .environments
+                .iter()
+                .find(|environment| environment.is_primary)
+                .or_else(|| input.environments.first())
+                .map(|environment| environment.cwd.inferred_native_path_string());
+            self.contribute_for_query(&config, &query, workspace_path.as_deref())
         })
     }
 }

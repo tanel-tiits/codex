@@ -7,9 +7,21 @@ use codex_rollout_trace::TerminalRequest;
 use codex_rollout_trace::ToolCallKind;
 
 use crate::AgentImprovementEvidence;
+use crate::ConfidenceLevel;
+use crate::EvidenceProfile;
+use crate::ExitBucket;
 use crate::ExperienceCard;
+use crate::ExperienceScope;
 use crate::FailureClass;
+use crate::FailureSignature;
+use crate::ModelFamily;
+use crate::ObservedStep;
+use crate::OperationClass;
+use crate::PolicyReason;
 use crate::TaskFamily;
+use crate::ToolFamily;
+use crate::ToolchainFamily;
+use crate::VerificationState;
 use crate::schema::MAX_ACTIVITY_LABELS;
 use crate::schema::MAX_CARD_SIGNALS;
 use crate::schema::topic_hashes_for_text;
@@ -66,7 +78,22 @@ pub fn summarize_rollout(trace: &RolloutTrace) -> ExperienceCard {
 
     let verification = verification_labels(failure_class, &evidence);
     let recommendation = recommendation(failure_class);
-    ExperienceCard::new_with_details(
+    let mut evidence_profile = EvidenceProfile::from_legacy(&signals, failure_class, &verification);
+    let effectively_completed = matches!(&trace.status, RolloutStatus::Completed)
+        || trace
+            .codex_turns
+            .values()
+            .any(|turn| matches!(turn.execution.status, ExecutionStatus::Completed));
+    evidence_profile.observed_sequence = observed_sequence(
+        &evidence,
+        policy_blocked,
+        effectively_completed,
+        failure_class,
+    );
+    if effectively_completed && !matches!(failure_class, FailureClass::Completed) {
+        push_profile_fact(&mut evidence_profile, crate::EvidenceFact::RecoveryObserved);
+    }
+    ExperienceCard::new_with_rich_details(
         trace.trace_id.clone(),
         trace.ended_at_unix_ms.unwrap_or(trace.started_at_unix_ms),
         task_family,
@@ -77,6 +104,10 @@ pub fn summarize_rollout(trace: &RolloutTrace) -> ExperienceCard {
         signals,
         recommendation,
         verification,
+        experience_scope(trace, &command_text),
+        failure_signature(trace, failure_class, policy_blocked),
+        evidence_profile,
+        confidence_for_failure(failure_class),
     )
 }
 
@@ -120,18 +151,58 @@ fn evidence(trace: &RolloutTrace) -> AgentImprovementEvidence {
             evidence.failed_terminal_operation_count =
                 evidence.failed_terminal_operation_count.saturating_add(1);
         }
-        if is_verification_command(&operation.request)
-            && operation
+        if is_verification_command(&operation.request) {
+            evidence.verification_attempt_count =
+                evidence.verification_attempt_count.saturating_add(1);
+            match operation
                 .result
                 .as_ref()
                 .and_then(|result| result.exit_code)
-                == Some(0)
-        {
-            evidence.verification_step_count = evidence.verification_step_count.saturating_add(1);
+            {
+                Some(0) => {
+                    evidence.verification_step_count =
+                        evidence.verification_step_count.saturating_add(1);
+                }
+                Some(_) | None => {
+                    evidence.failed_verification_count =
+                        evidence.failed_verification_count.saturating_add(1);
+                }
+            }
         }
     }
 
     evidence
+}
+
+fn observed_sequence(
+    evidence: &AgentImprovementEvidence,
+    policy_blocked: bool,
+    effectively_completed: bool,
+    failure_class: FailureClass,
+) -> Vec<ObservedStep> {
+    let mut sequence = Vec::new();
+    if evidence.turn_count > 0 {
+        push_observed_step(&mut sequence, ObservedStep::Turn);
+    }
+    if evidence.inference_count > 0 {
+        push_observed_step(&mut sequence, ObservedStep::Inference);
+    }
+    if evidence.tool_count > 0 {
+        push_observed_step(&mut sequence, ObservedStep::Tool);
+    }
+    if evidence.terminal_operation_count > 0 {
+        push_observed_step(&mut sequence, ObservedStep::TerminalOperation);
+    }
+    if evidence.verification_attempt_count > 0 {
+        push_observed_step(&mut sequence, ObservedStep::VerificationAttempt);
+    }
+    if policy_blocked {
+        push_observed_step(&mut sequence, ObservedStep::PolicyBoundary);
+    }
+    if effectively_completed && failure_class != FailureClass::Completed {
+        push_observed_step(&mut sequence, ObservedStep::Recovery);
+    }
+    sequence
 }
 
 fn classify_failure(
@@ -387,6 +458,199 @@ fn verification_labels(
         FailureClass::Unknown => "inspect_reduced_trace",
     };
     vec![label.to_string()]
+}
+
+fn experience_scope(trace: &RolloutTrace, command_text: &str) -> ExperienceScope {
+    let workspace_path = trace.terminal_operations.values().find_map(|operation| {
+        let TerminalRequest::ExecCommand { cwd, .. } = &operation.request else {
+            return None;
+        };
+        Some(cwd.as_str())
+    });
+    let model_family = trace
+        .inference_calls
+        .values()
+        .next()
+        .map(|call| model_family_for_name(&call.model));
+    let toolchain_family = toolchain_family_for_text(command_text);
+    ExperienceScope {
+        workspace_key: workspace_path
+            .and_then(|path| ExperienceScope::for_workspace_path(path).workspace_key),
+        toolchain_family: (toolchain_family != ToolchainFamily::Unknown)
+            .then_some(toolchain_family),
+        model_family: model_family.filter(|family| *family != ModelFamily::Unknown),
+    }
+}
+
+fn failure_signature(
+    trace: &RolloutTrace,
+    failure_class: FailureClass,
+    policy_blocked: bool,
+) -> FailureSignature {
+    let tool_family = trace
+        .tool_calls
+        .values()
+        .find(|tool| is_failed_execution(&tool.execution.status))
+        .or_else(|| trace.tool_calls.values().next())
+        .map(|tool| tool_family_for_kind(&tool.kind))
+        .or_else(|| (!trace.terminal_operations.is_empty()).then_some(ToolFamily::ExecCommand))
+        .unwrap_or(ToolFamily::None);
+    let operation_class = match failure_class {
+        FailureClass::CommandFailure => OperationClass::Command,
+        FailureClass::ToolFailure => OperationClass::Tool,
+        FailureClass::ModelFailure => OperationClass::Inference,
+        FailureClass::PolicyBlocked => OperationClass::Policy,
+        FailureClass::IncompleteVerification => OperationClass::Verification,
+        FailureClass::Completed if !trace.terminal_operations.is_empty() => OperationClass::Command,
+        FailureClass::Completed if !trace.tool_calls.is_empty() => OperationClass::Tool,
+        FailureClass::Completed => OperationClass::None,
+        FailureClass::Cancelled | FailureClass::Unknown => OperationClass::Unknown,
+    };
+    let verification_state = if trace.terminal_operations.values().any(|operation| {
+        is_verification_command(&operation.request)
+            && operation
+                .result
+                .as_ref()
+                .and_then(|result| result.exit_code)
+                == Some(0)
+    }) {
+        VerificationState::Passed
+    } else if trace
+        .terminal_operations
+        .values()
+        .any(|operation| is_verification_command(&operation.request))
+    {
+        VerificationState::Failed
+    } else if matches!(failure_class, FailureClass::IncompleteVerification) {
+        VerificationState::Missing
+    } else if trace.terminal_operations.is_empty() {
+        VerificationState::NotApplicable
+    } else {
+        VerificationState::Unknown
+    };
+    FailureSignature {
+        operation_class,
+        tool_family,
+        exit_bucket: if policy_blocked {
+            ExitBucket::Blocked
+        } else if matches!(failure_class, FailureClass::Cancelled) {
+            ExitBucket::Cancelled
+        } else if trace
+            .terminal_operations
+            .values()
+            .any(terminal_operation_failed)
+        {
+            ExitBucket::NonZero
+        } else if verification_state == VerificationState::Passed {
+            ExitBucket::Success
+        } else {
+            ExitBucket::Unknown
+        },
+        policy_reason: policy_reason(trace),
+        verification_state,
+    }
+}
+
+fn policy_reason(trace: &RolloutTrace) -> PolicyReason {
+    let text = trace
+        .terminal_operations
+        .values()
+        .filter_map(|operation| operation.result.as_ref())
+        .map(|result| {
+            format!(
+                "{} {} {}",
+                result.stdout,
+                result.stderr,
+                result.formatted_output.as_deref().unwrap_or("")
+            )
+        })
+        .collect::<Vec<_>>()
+        .join(" ")
+        .to_ascii_lowercase();
+    if text.contains("approval required") || text.contains("approval denied") {
+        PolicyReason::ApprovalRequired
+    } else if text.contains("sandbox") {
+        PolicyReason::SandboxRestricted
+    } else if text.contains("permission denied") || text.contains("operation not permitted") {
+        PolicyReason::PermissionDenied
+    } else if has_policy_boundary(trace) {
+        PolicyReason::Other
+    } else {
+        PolicyReason::NotObserved
+    }
+}
+
+fn tool_family_for_kind(kind: &ToolCallKind) -> ToolFamily {
+    match kind {
+        ToolCallKind::ExecCommand => ToolFamily::ExecCommand,
+        ToolCallKind::WriteStdin => ToolFamily::WriteStdin,
+        ToolCallKind::ApplyPatch => ToolFamily::ApplyPatch,
+        ToolCallKind::Mcp { .. } => ToolFamily::Mcp,
+        ToolCallKind::Web => ToolFamily::Web,
+        ToolCallKind::ImageGeneration => ToolFamily::ImageGeneration,
+        ToolCallKind::SpawnAgent
+        | ToolCallKind::AssignAgentTask
+        | ToolCallKind::SendMessage
+        | ToolCallKind::WaitAgent
+        | ToolCallKind::CloseAgent => ToolFamily::Agent,
+        ToolCallKind::Other { .. } => ToolFamily::Other,
+    }
+}
+
+fn toolchain_family_for_text(text: &str) -> ToolchainFamily {
+    let text = text.to_ascii_lowercase();
+    if has_any(&text, &["cargo", "rustc", "rustfmt"]) {
+        ToolchainFamily::Rust
+    } else if has_any(&text, &["npm", "pnpm", "yarn", "node", "jest", "vitest"]) {
+        ToolchainFamily::Node
+    } else if has_any(&text, &["python", "pytest"]) {
+        ToolchainFamily::Python
+    } else if has_any(&text, &["go test", "go build", "gofmt"]) {
+        ToolchainFamily::Go
+    } else if has_any(&text, &["dotnet", "msbuild"]) {
+        ToolchainFamily::Dotnet
+    } else if has_any(&text, &["mvn", "gradle", "java"]) {
+        ToolchainFamily::Java
+    } else if has_any(&text, &["bundle", "rspec", "ruby"]) {
+        ToolchainFamily::Ruby
+    } else {
+        ToolchainFamily::Unknown
+    }
+}
+
+fn model_family_for_name(model: &str) -> ModelFamily {
+    let model = model.to_ascii_lowercase();
+    if model.contains("gpt") || model.contains("o1") || model.contains("o3") {
+        ModelFamily::OpenAi
+    } else if model.contains("claude") {
+        ModelFamily::Anthropic
+    } else if model.contains("gemini") {
+        ModelFamily::Google
+    } else if model.contains("local") || model.contains("llama") {
+        ModelFamily::Local
+    } else {
+        ModelFamily::Other
+    }
+}
+
+fn confidence_for_failure(failure_class: FailureClass) -> ConfidenceLevel {
+    match failure_class {
+        FailureClass::Unknown => ConfidenceLevel::Low,
+        FailureClass::Completed | FailureClass::IncompleteVerification => ConfidenceLevel::Medium,
+        _ => ConfidenceLevel::High,
+    }
+}
+
+fn push_profile_fact(profile: &mut EvidenceProfile, fact: crate::EvidenceFact) {
+    if profile.facts.len() < MAX_CARD_SIGNALS && !profile.facts.contains(&fact) {
+        profile.facts.push(fact);
+    }
+}
+
+fn push_observed_step(sequence: &mut Vec<ObservedStep>, step: ObservedStep) {
+    if sequence.len() < MAX_CARD_SIGNALS && !sequence.contains(&step) {
+        sequence.push(step);
+    }
 }
 
 fn recommendation(failure_class: FailureClass) -> &'static str {

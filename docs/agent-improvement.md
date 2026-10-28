@@ -30,10 +30,23 @@ The card store is:
 $CODEX_HOME/agent-improvement/cards.jsonl
 ```
 
-Codex reads that file at turn preparation time and selects cards with
-deterministic lexical overlap and opaque topic-key overlap against the current
-user text. Missing stores, malformed lines, oversized cards, and read failures
-are ignored with a bounded warning.
+Codex reads that file at turn preparation time and selects active cards with
+deterministic structured matches (workspace, task family, failure class, tool
+and toolchain family) plus evidence quality, confidence, recurrence, recency,
+and bounded lexical/topic overlap. A mismatched opaque workspace is filtered;
+unknown scope remains a fallback. Missing stores, malformed lines, oversized
+cards, and read failures are ignored with a bounded warning.
+
+Cards use schema version 2. Each card contains a bounded observed sequence
+(`turn`, `inference`, `tool`, `terminal_operation`, verification, policy, or
+recovery categories) alongside the evidence profile. Version 1 cards are
+upgraded in memory with
+conservative unknown values, while unknown future schema versions are skipped.
+Recurring observations with the same lesson identity merge their evidence and
+provenance. Retrieval treats direct runtime facts as stronger than hypotheses;
+hypotheses and recommendations are rendered as advisory labels, never as
+policy. Old cards receive lower recency scores over time, but are not silently
+deleted.
 
 Retrieval and capture are independent. capture = "off" is the default.
 Setting capture = "candidate" enables local rollout tracing under
@@ -115,6 +128,39 @@ The embedded agent-card-curator Skill provides a conversational review workflow
 around these commands. It must receive explicit user approval before accepting
 a candidate.
 
+## Review card adoption
+
+When a selected card is shown to the model, Codex records a bounded exposure
+counter. Exposure does not mean the recommendation was followed or caused a
+successful result. Record explicit feedback when a card is useful or harmful:
+
+```bash
+codex debug agent-improvement cards feedback \
+  --store "$CODEX_HOME/agent-improvement" \
+  card_<ID> --value positive
+```
+
+If a later result can be linked to the card, record the linkage explicitly;
+otherwise use `unknown` rather than inventing causality:
+
+```bash
+codex debug agent-improvement cards outcome \
+  --store "$CODEX_HOME/agent-improvement" \
+  card_<ID> --followed yes --verified yes
+```
+
+The values for both fields are `yes`, `no`, `mixed`, or `unknown`. The stored
+fields distinguish exposure, feedback, followed, and verified attribution.
+
+Retire a card that is stale, contradictory, or no longer useful. Retirement is
+append-only and preserves its local audit record:
+
+```bash
+codex debug agent-improvement cards retire \
+  --store "$CODEX_HOME/agent-improvement" \
+  card_<ID>
+```
+
 ## Inspect and remove cards and candidates
 
 Preview the cards that would be relevant to a task:
@@ -125,8 +171,9 @@ codex debug agent-improvement render \
   --query "fix the parser and run targeted tests"
 ```
 
-The store is append-only during normal card creation and deduplicates
-deterministic card IDs. Candidate status transitions are also append-only;
+The store is append-only during normal card creation. It deduplicates exact
+card updates, merges recurring lesson identities, and loads the latest valid
+record for each card ID. Candidate status transitions are also append-only;
 loading uses the latest valid record for each candidate ID. To remove
 experience, stop Codex and delete the relevant local files:
 

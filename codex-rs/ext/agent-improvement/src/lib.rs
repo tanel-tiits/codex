@@ -21,11 +21,17 @@ pub use candidates::{
 };
 pub use extension::{AgentImprovementExtensionConfig, install};
 pub use schema::{
-    AgentImprovementEvidence, EXPERIENCE_CARD_SCHEMA_VERSION, ExperienceCard, FailureClass,
-    TaskFamily, TokenUsageSummary,
+    AdoptionEvidence, AgentImprovementEvidence, AttributionState, CardStatus, ConfidenceLevel,
+    EXPERIENCE_CARD_SCHEMA_VERSION, EvidenceFact, EvidenceProfile, ExitBucket, ExperienceCard,
+    ExperienceScope, FailureClass, FailureSignature, FeedbackState, HypothesisKind,
+    InterventionKind, ModelFamily, ObservedStep, OperationClass, OutcomeKind, PolicyReason,
+    Recurrence, TaskFamily, TokenUsageSummary, ToolFamily, ToolchainFamily, VerificationState,
+    workspace_scope_key,
 };
 pub use store::{
-    STORE_FILE_NAME, append_card, cards_path, load_cards, render_cards, select_relevant,
+    ExperienceRetrievalContext, STORE_FILE_NAME, append_card, cards_path, load_cards,
+    record_card_exposure, record_card_feedback, record_card_outcome, render_cards, retire_card,
+    select_relevant, select_relevant_with_context,
 };
 pub use summarize::summarize_rollout;
 
