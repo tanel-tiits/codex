@@ -368,6 +368,14 @@ fn paired_eval_reports_held_out_outcomes_and_keeps_private_inputs_out() -> Resul
             .verification_attempts,
         1
     );
+    assert_eq!(
+        result.scenarios[0].evaluator_version,
+        super::EVALUATOR_VERSION
+    );
+    assert_eq!(
+        result.scenarios[0].evaluator_fingerprint,
+        manifest.scenarios[0].evaluator.fingerprint()
+    );
 
     let json = serde_json::to_string(&result)?;
     assert!(!json.contains("fix parser and run cargo test"));

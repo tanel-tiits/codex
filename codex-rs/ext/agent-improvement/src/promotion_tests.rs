@@ -140,6 +140,8 @@ fn result(
             task_fingerprint: "task-v1".to_string(),
             repository_snapshot_fingerprint: "repo-v1".to_string(),
             evaluator: EvaluatorKind::HumanJudge,
+            evaluator_version: crate::EVALUATOR_VERSION,
+            evaluator_fingerprint: "evaluator-v1".to_string(),
             baseline: condition(baseline, baseline, "trace-baseline"),
             treatment: condition(true, treatment, "trace-treatment"),
             delta: MetricDelta {

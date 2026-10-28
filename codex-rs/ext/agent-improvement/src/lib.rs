@@ -4,6 +4,7 @@
 //! runtime. It stores derived, reviewable evidence rather than replaying raw
 //! prompts, model responses, paths, or terminal output into future turns.
 
+mod benchmark;
 mod candidate;
 mod candidates;
 mod capture;
@@ -17,6 +18,22 @@ mod schema;
 mod store;
 mod summarize;
 
+pub use benchmark::{
+    BENCHMARK_BASELINE_INPUT_SCHEMA_VERSION, BENCHMARK_BASELINE_REPORT_SCHEMA_VERSION,
+    BENCHMARK_EVALUATOR_VERSION, BENCHMARK_MANIFEST_SCHEMA_VERSION,
+    BENCHMARK_QUALIFICATION_REPORT_SCHEMA_VERSION, BaselineCalibrationStatus,
+    BaselineCostDistribution, BenchmarkBaselineFamilyResult, BenchmarkBaselineInput,
+    BenchmarkBaselineObservation, BenchmarkBaselineReport, BenchmarkBaselineTaskResult,
+    BenchmarkDifficulty, BenchmarkExpectedContract, BenchmarkFailureMotif, BenchmarkFixture,
+    BenchmarkFixtureKind, BenchmarkManifest, BenchmarkQualificationReport,
+    BenchmarkReferenceSolution, BenchmarkTask, BenchmarkTaskFamily,
+    BenchmarkTaskQualificationResult, BenchmarkValidationReport, CEILING_SUCCESS_BPS,
+    FixtureExecutionEvidence, FixtureExecutionStatus, FixtureQualificationResult,
+    MAX_BENCHMARK_TASKS, MAX_CALIBRATED_SUCCESS_BPS, MIN_BENCHMARK_FAMILIES, MIN_BENCHMARK_TASKS,
+    MIN_CALIBRATED_SUCCESS_BPS, ModelVisibleBenchmarkTask, TOO_HARD_SUCCESS_BPS,
+    benchmark_protected_paths, build_qualification_report, calibrate_baseline, load_baseline_input,
+    load_benchmark_manifest,
+};
 pub use candidate::{
     CandidateStatus, CandidateTrigger, EXPERIENCE_CANDIDATE_SCHEMA_VERSION, ExperienceCandidate,
 };
@@ -26,14 +43,15 @@ pub use candidates::{
 };
 pub use eval::{
     AttributionAssessment, AttributionEvidence, CheckResult, EVALUATION_MANIFEST_SCHEMA_VERSION,
-    EVALUATION_RESULT_SCHEMA_VERSION, EvaluationAggregate, EvaluationBudget, EvaluationCondition,
-    EvaluationConditionProvenance, EvaluationConditionResult, EvaluationErrorCode,
-    EvaluationManifest, EvaluationMemory, EvaluationMemoryProvenance, EvaluationMetrics,
-    EvaluationRepository, EvaluationResult, EvaluationRetrievalEvidence, EvaluationRetrievalResult,
-    EvaluationScenario, EvaluationScenarioResult, EvaluationSplit, EvaluationStatus,
-    EvaluationTask, EvaluatorKind, EvaluatorResult, EvaluatorSpec, EvaluatorStatus, JudgeLabel,
-    MetricDelta, PolicyStatus, PostRunEvidence, TraceStatus, VerificationCheck, evaluate_manifest,
-    evaluate_manifest_at, load_evaluation_manifest, write_evaluation_result,
+    EVALUATION_RESULT_SCHEMA_VERSION, EVALUATOR_VERSION, EvaluationAggregate, EvaluationBudget,
+    EvaluationCondition, EvaluationConditionProvenance, EvaluationConditionResult,
+    EvaluationErrorCode, EvaluationManifest, EvaluationMemory, EvaluationMemoryProvenance,
+    EvaluationMetrics, EvaluationRepository, EvaluationResult, EvaluationRetrievalEvidence,
+    EvaluationRetrievalResult, EvaluationScenario, EvaluationScenarioResult, EvaluationSplit,
+    EvaluationStatus, EvaluationTask, EvaluatorKind, EvaluatorResult, EvaluatorSpec,
+    EvaluatorStatus, JudgeLabel, MetricDelta, PolicyStatus, PostRunEvidence, TraceStatus,
+    VerificationCheck, evaluate_manifest, evaluate_manifest_at, load_evaluation_manifest,
+    write_evaluation_result,
 };
 pub use evolve::{
     CardMaintenancePlan, EVOLUTION_HISTORY_FILE_NAME, EVOLUTION_HISTORY_SCHEMA_VERSION,

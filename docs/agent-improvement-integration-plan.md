@@ -1,8 +1,9 @@
 # Agent Improvement Integration Plan
 
-Status: Milestone 8a.2 evaluator and retrieval hardening complete; Milestones
-1–7 and 8a–8a.2 complete; the practical-value track (8a.3–8a.7) and full
-program-level evolution remain gated
+Status: Milestone 8a.3 benchmark/evaluator qualification infrastructure is in
+progress; Milestones 1–7 and 8a–8a.2 are complete; the 8a.3 exit gate, the
+remaining practical-value track (8a.4–8a.7), and full program-level evolution
+remain gated
 
 Latest live study: [Milestone 8a.1 pilot report](agent-improvement-pilot-8a1.md).
 It found no task-success lift in the first corrected 8-task study, so Milestone
@@ -122,7 +123,7 @@ satisfied.
 | 8a. Bounded live evaluation and feedback bridge | Run a private held-out brief in paired isolated worktrees, produce a redacted result, and optionally record one explicit outcome | Essential before optional autonomy | 4–7 | Complete; opt-in/manual; no automatic promotion |
 | 8a.1. Independent evaluation and observability hardening | Execute bounded evaluator-side checks before cleanup and separate coding outcome from trace and policy diagnostics | Essential before Milestone 8 | 8a | Complete; opt-in/manual; no automatic promotion |
 | 8a.2. Evaluator and retrieval hardening | Preflight evaluator contracts, bounded live retrieval, and separate selection/exposure evidence make the next pilot trustworthy | Essential before Milestone 8 | 8a.1 | Complete; opt-in/manual; no automatic promotion |
-| 8a.3. Benchmark and evaluator qualification | A realistic, non-ceiling task pack and adversarial evaluator fixtures make behavioral claims trustworthy | Essential | 8a.2 | Planned |
+| 8a.3. Benchmark and evaluator qualification | A realistic, non-ceiling task pack and adversarial evaluator fixtures make behavioral claims trustworthy | Essential | 8a.2 | In progress; contract and no-model qualification harness implemented, private pack/calibration/review pending |
 | 8a.4. Intervention cards and scoped retrieval | Cards contain a trigger, one bounded action, a verification target, and explicit scope; retrieval is task-local and low-noise | High value | 8a.3 | Planned |
 | 8a.5. Causal exposure and action telemetry | Private evidence distinguishes card selection, injection, attempted action, verification, and outcome without claiming causation from exposure | Essential | 8a.4 | Planned |
 | 8a.6. Repeated practical-value pilot | A preregistered 32–48-task study tests correctness, recovery, cost, and negative transfer across repeated trials | Essential decision gate | 8a.3–8a.5 | Planned |
@@ -755,8 +756,8 @@ material in the next study.
 
 ### Milestone 8a.3 — Benchmark and evaluator qualification
 
-**Implementation status: planned; no behavioral claim is allowed before this
-milestone passes.**
+**Implementation status: in progress; no behavioral claim is allowed before
+this milestone passes.**
 
 The first pilot was too close to a ceiling and its private checks contained
 three defects. This milestone makes the task pack and evaluator a testable
@@ -805,6 +806,14 @@ are detected, no task or evaluator leaks private expected answers, and the
 retrieval-disabled baseline is neither a ceiling nor a universal failure. If
 the gate fails, repair the benchmark; do not tune cards against invalid
 measurements.
+
+The current implementation provides the versioned private manifest contract,
+model-visible task projection, evaluator fingerprints, fixture qualification
+report, isolated argv-only no-model runner, and retrieval-disabled baseline
+calibration report. The repository tests use synthetic 32-task fixtures to
+exercise the gate. A real private task pack, fresh retrieval-disabled model
+observations in the 40–75% range, and review by someone who did not author the
+evaluator are still required before this milestone can be marked complete.
 
 ### Milestone 8a.4 — Intervention cards and task-local retrieval
 
@@ -1554,6 +1563,18 @@ scope. The full core suite remains environment-limited by unrelated listener,
 proxy, and certificate-write restrictions, so no live behavioral result is
 claimed here.
 
+Milestone 8a.3 adds a private benchmark manifest with explicit model-visible
+projection, source-commit and worktree isolation checks, evaluator-version and
+fingerprint matching, good/no-op/incomplete/targeted-mutant qualification
+evidence, bounded argv-only fixture execution, report redaction, and baseline
+calibration thresholds. The focused extension benchmark suite covers
+model-context leakage, duplicate and family bounds, false-positive mutants,
+missing checks, timeout/spawn failure evidence, evaluator identity, and
+qualified/ceiling/too-hard calibration. The CLI smoke test qualifies 32 tasks
+and 128 isolated fixture copies without model execution and confirms cleanup.
+The private benchmark pack, real baseline observations, and independent review
+remain outstanding, so the 8a.3 exit gate is not yet claimed.
+
 An earlier broader `cargo test -p codex-core config` run compiled the target
 and then aborted in the unrelated existing
 `tools::handlers::multi_agents::tests::multi_agent_v2_spawn_agent_ignores_configured_max_depth`
@@ -1621,7 +1642,7 @@ cross-task evidence.
 | 8a-C Evaluator feedback bridge | complete | Redacted result reuse, optional evolution-history outcome recording, dry-run CLI coverage, 73 extension tests, and 10 CLI integration tests |
 | 8a.1 Independent evaluation and observability hardening | complete | Post-run argv checks before cleanup, redacted check evidence, trace/policy separation, bounded evaluator time, live-plan cap, 77 extension tests, and 10 CLI integration tests |
 | 8a.2 Evaluator and retrieval hardening | complete | Preflight contracts, bounded relevance/exposure evidence, redacted selection fingerprints, config/schema tests, 79 extension tests, 383 config tests, and 10 CLI integration tests |
-| 8a.3 Benchmark and evaluator qualification | planned | Versioned non-ceiling task pack, good/no-op/mutant fixtures, evaluator preflight report, and independent qualification review |
+| 8a.3 Benchmark and evaluator qualification | in progress | Versioned manifest/projection, no-model fixture qualification and calibration commands/tests; private non-ceiling pack and independent review still required |
 | 8a.4 Intervention cards and task-local retrieval | planned | Versioned trigger/action/verification cards, scoped one-card retrieval, 300–600-token rendering, and offline precision/negative-transfer report |
 | 8a.5 Causal exposure and action telemetry | planned | Private selected/injected/attempted/verified event chain, redacted aggregates, and unknown-attribution tests |
 | 8a.6 Repeated practical-value pilot | planned | Preregistered 32–48-task, two-trial paired study with task/family deltas, cost accounting, and explicit go/no-go decision |

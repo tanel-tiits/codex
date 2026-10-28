@@ -8,9 +8,11 @@ use codex_agent_improvement_extension::AGENT_IMPROVEMENT_ROOT_ENV;
 use codex_agent_improvement_extension::AGENT_IMPROVEMENT_WORKSPACE_PATH_ENV;
 use codex_agent_improvement_extension::AttributionEvidence;
 use codex_agent_improvement_extension::AttributionState;
+use codex_agent_improvement_extension::BenchmarkQualificationReport;
 use codex_agent_improvement_extension::CandidateStatus;
 use codex_agent_improvement_extension::CheckResult;
 use codex_agent_improvement_extension::EVALUATION_MANIFEST_SCHEMA_VERSION;
+use codex_agent_improvement_extension::EVALUATOR_VERSION;
 use codex_agent_improvement_extension::EXPERIENCE_CARD_SCHEMA_VERSION;
 use codex_agent_improvement_extension::EvaluationCondition;
 use codex_agent_improvement_extension::EvaluationManifest;
@@ -23,6 +25,8 @@ use codex_agent_improvement_extension::EvolutionConfig;
 use codex_agent_improvement_extension::EvolutionOutcome;
 use codex_agent_improvement_extension::ExperienceCandidate;
 use codex_agent_improvement_extension::FeedbackState;
+use codex_agent_improvement_extension::FixtureExecutionEvidence;
+use codex_agent_improvement_extension::FixtureExecutionStatus;
 use codex_agent_improvement_extension::ImprovementCandidate;
 use codex_agent_improvement_extension::ImprovementCandidateStatus;
 use codex_agent_improvement_extension::ImprovementEvidenceCatalog;
@@ -33,6 +37,9 @@ use codex_agent_improvement_extension::VerificationCheck;
 use codex_agent_improvement_extension::accept_proposal;
 use codex_agent_improvement_extension::append_card;
 use codex_agent_improvement_extension::apply_card_maintenance;
+use codex_agent_improvement_extension::benchmark_protected_paths;
+use codex_agent_improvement_extension::build_qualification_report;
+use codex_agent_improvement_extension::calibrate_baseline;
 use codex_agent_improvement_extension::candidates_path;
 use codex_agent_improvement_extension::cards_path;
 use codex_agent_improvement_extension::compact_card_store;
@@ -46,6 +53,8 @@ use codex_agent_improvement_extension::fingerprint_card_set;
 use codex_agent_improvement_extension::fingerprint_descriptor;
 use codex_agent_improvement_extension::fingerprint_evaluation_result;
 use codex_agent_improvement_extension::forget_card_store;
+use codex_agent_improvement_extension::load_baseline_input;
+use codex_agent_improvement_extension::load_benchmark_manifest;
 use codex_agent_improvement_extension::load_candidates;
 use codex_agent_improvement_extension::load_cards;
 use codex_agent_improvement_extension::load_evaluation_manifest;
@@ -108,6 +117,7 @@ use std::collections::BTreeSet;
 use std::collections::HashSet;
 use std::io::IsTerminal;
 use std::io::Write;
+use std::path::Path;
 use std::path::PathBuf;
 use std::process::Command as ProcessCommand;
 use std::process::Stdio;
@@ -409,6 +419,9 @@ enum DebugAgentImprovementSubcommand {
     /// Evaluate paired baseline and memory-assisted rollout bundles.
     Eval(DebugAgentImprovementEvalCommand),
 
+    /// Validate and qualify a private benchmark without model execution.
+    Benchmark(DebugAgentImprovementBenchmarkCommand),
+
     /// Draft and validate review-only improvement artifacts.
     Proposals(DebugAgentImprovementProposalsCommand),
 
@@ -437,6 +450,66 @@ struct DebugAgentImprovementEvalCommand {
     /// Write the redacted aggregate result to this file.
     #[arg(long = "output", short = 'o', value_name = "RESULTS", required = true)]
     output: PathBuf,
+}
+
+#[derive(Debug, Parser)]
+struct DebugAgentImprovementBenchmarkCommand {
+    #[command(subcommand)]
+    subcommand: DebugAgentImprovementBenchmarkSubcommand,
+}
+
+#[derive(Debug, clap::Subcommand)]
+enum DebugAgentImprovementBenchmarkSubcommand {
+    /// Validate a private benchmark manifest and print its redacted report.
+    #[command(alias = "report")]
+    Validate(DebugAgentImprovementBenchmarkValidateCommand),
+
+    /// Run evaluator fixtures in isolated copies without launching a model.
+    Qualify(DebugAgentImprovementBenchmarkQualifyCommand),
+
+    /// Classify a retrieval-disabled baseline as qualified, ceiling, or too hard.
+    Calibrate(DebugAgentImprovementBenchmarkCalibrateCommand),
+}
+
+#[derive(Debug, Parser)]
+struct DebugAgentImprovementBenchmarkValidateCommand {
+    /// Private versioned benchmark manifest.
+    #[arg(value_name = "MANIFEST")]
+    manifest: PathBuf,
+
+    /// Optional redacted validation report destination.
+    #[arg(long = "output", short = 'o', value_name = "REPORT")]
+    output: Option<PathBuf>,
+}
+
+#[derive(Debug, Parser)]
+struct DebugAgentImprovementBenchmarkQualifyCommand {
+    /// Private versioned benchmark manifest.
+    #[arg(value_name = "MANIFEST")]
+    manifest: PathBuf,
+
+    /// Parent directory for temporary isolated fixture copies.
+    #[arg(long = "run-root", value_name = "DIR", required = true)]
+    run_root: PathBuf,
+
+    /// Optional redacted qualification report destination.
+    #[arg(long = "output", short = 'o', value_name = "REPORT")]
+    output: Option<PathBuf>,
+}
+
+#[derive(Debug, Parser)]
+struct DebugAgentImprovementBenchmarkCalibrateCommand {
+    /// Private versioned benchmark manifest.
+    #[arg(value_name = "MANIFEST")]
+    manifest: PathBuf,
+
+    /// Retrieval-disabled task-level baseline observations.
+    #[arg(long = "baseline", value_name = "FILE", required = true)]
+    baseline: PathBuf,
+
+    /// Optional private calibration report destination.
+    #[arg(long = "output", short = 'o', value_name = "REPORT")]
+    output: Option<PathBuf>,
 }
 
 #[derive(Debug, Parser)]
@@ -785,6 +858,10 @@ struct DebugAgentImprovementEvolveEvaluateCommand {
     /// Validate the plan and print the execution contract without launching Codex.
     #[arg(long = "dry-run", default_value_t = false)]
     dry_run: bool,
+
+    /// Required for a real run: a passing Milestone 8a.3 qualification report.
+    #[arg(long = "qualification-report", value_name = "FILE")]
+    qualification_report: Option<PathBuf>,
 }
 
 #[derive(Debug, Parser)]
@@ -2525,6 +2602,9 @@ async fn cli_main(
                     DebugAgentImprovementSubcommand::Eval(cmd) => {
                         run_debug_agent_improvement_eval_command(cmd)?;
                     }
+                    DebugAgentImprovementSubcommand::Benchmark(cmd) => {
+                        run_debug_agent_improvement_benchmark_command(cmd)?;
+                    }
                     DebugAgentImprovementSubcommand::Proposals(cmd) => {
                         run_debug_agent_improvement_proposals_command(cmd)?;
                     }
@@ -2791,6 +2871,256 @@ fn run_debug_agent_improvement_eval_command(
     Ok(())
 }
 
+fn run_debug_agent_improvement_benchmark_command(
+    cmd: DebugAgentImprovementBenchmarkCommand,
+) -> anyhow::Result<()> {
+    match cmd.subcommand {
+        DebugAgentImprovementBenchmarkSubcommand::Validate(cmd) => {
+            let manifest = load_benchmark_manifest(&cmd.manifest)?;
+            let report = manifest.validation_report();
+            let mut protected = benchmark_protected_paths(&manifest);
+            protected.push(path_identity_for_cli(&cmd.manifest));
+            emit_benchmark_json(&report, cmd.output.as_deref(), &protected)?;
+        }
+        DebugAgentImprovementBenchmarkSubcommand::Qualify(cmd) => {
+            run_debug_agent_improvement_benchmark_qualify_command(cmd)?;
+        }
+        DebugAgentImprovementBenchmarkSubcommand::Calibrate(cmd) => {
+            let manifest = load_benchmark_manifest(&cmd.manifest)?;
+            let baseline = load_baseline_input(&cmd.baseline)?;
+            let report = calibrate_baseline(&manifest, &baseline)?;
+            let mut protected = benchmark_protected_paths(&manifest);
+            protected.push(path_identity_for_cli(&cmd.manifest));
+            protected.push(path_identity_for_cli(&cmd.baseline));
+            emit_benchmark_json(&report, cmd.output.as_deref(), &protected)?;
+        }
+    }
+    Ok(())
+}
+
+fn run_debug_agent_improvement_benchmark_qualify_command(
+    cmd: DebugAgentImprovementBenchmarkQualifyCommand,
+) -> anyhow::Result<()> {
+    let manifest = load_benchmark_manifest(&cmd.manifest)?;
+    let run_root = path_identity_for_cli(&cmd.run_root);
+    for protected in benchmark_protected_paths(&manifest) {
+        anyhow::ensure!(
+            !paths_overlap_for_cli(&run_root, &protected),
+            "benchmark qualification run root overlaps a protected benchmark path"
+        );
+    }
+    let output_identity = cmd.output.as_ref().map(|path| path_identity_for_cli(path));
+    anyhow::ensure!(
+        output_identity
+            .as_ref()
+            .is_none_or(|output| !paths_overlap_for_cli(output, &run_root)),
+        "benchmark qualification output overlaps its run root"
+    );
+    std::fs::create_dir_all(&run_root)
+        .with_context(|| format!("create benchmark qualification root {}", run_root.display()))?;
+    let run_dir = run_root.join(format!(
+        "qualification-{}-{}",
+        current_unix_ms(),
+        std::process::id()
+    ));
+    std::fs::create_dir(&run_dir)
+        .with_context(|| format!("create benchmark qualification run {}", run_dir.display()))?;
+
+    let mut evidence = Vec::new();
+    for task in &manifest.tasks {
+        let preflight_fixture = task.fixtures.iter().find(|fixture| {
+            fixture.kind == codex_agent_improvement_extension::BenchmarkFixtureKind::Good
+        });
+        let preflight_dir = run_dir.join("preflight").join(&task.task_id);
+        let preflight_passed = preflight_fixture.is_some_and(|fixture| {
+            if copy_benchmark_fixture_tree(&fixture.worktree, &preflight_dir).is_err() {
+                return false;
+            }
+            run_benchmark_preflight(task, &preflight_dir)
+        });
+
+        for fixture in &task.fixtures {
+            let fixture_dir = run_dir
+                .join("fixtures")
+                .join(&task.task_id)
+                .join(&fixture.fixture_id);
+            let copy_result = copy_benchmark_fixture_tree(&fixture.worktree, &fixture_dir);
+            let (status, checks) = match copy_result {
+                Err(_) => (
+                    FixtureExecutionStatus::FixtureUnavailable,
+                    failed_benchmark_checks(task),
+                ),
+                Ok(()) if !preflight_passed => (
+                    FixtureExecutionStatus::PreflightFailed,
+                    failed_benchmark_checks(task),
+                ),
+                Ok(()) => run_benchmark_fixture_checks(task, &fixture_dir),
+            };
+            evidence.push(FixtureExecutionEvidence {
+                task_id: task.task_id.clone(),
+                fixture_id: fixture.fixture_id.clone(),
+                evaluator_version: EVALUATOR_VERSION,
+                evaluator_fingerprint: manifest.evaluator_fingerprint(),
+                preflight_passed,
+                status,
+                checks,
+            });
+        }
+    }
+
+    let report = build_qualification_report(&manifest, &evidence);
+    let cleanup = std::fs::remove_dir_all(&run_dir)
+        .with_context(|| format!("clean benchmark qualification run {}", run_dir.display()));
+    let report = report?;
+    cleanup?;
+    let mut protected = benchmark_protected_paths(&manifest);
+    protected.push(path_identity_for_cli(&cmd.manifest));
+    emit_benchmark_json(&report, cmd.output.as_deref(), &protected)?;
+    Ok(())
+}
+
+fn emit_benchmark_json<T: serde::Serialize>(
+    value: &T,
+    output: Option<&Path>,
+    protected_paths: &[PathBuf],
+) -> anyhow::Result<()> {
+    let bytes = serde_json::to_vec_pretty(value)?;
+    if let Some(output) = output {
+        let output_identity = path_identity_for_cli(output);
+        for protected in protected_paths {
+            anyhow::ensure!(
+                !paths_overlap_for_cli(&output_identity, protected),
+                "benchmark report output overlaps a protected private input"
+            );
+        }
+        if let Some(parent) = output.parent() {
+            std::fs::create_dir_all(parent).with_context(|| {
+                format!("create benchmark report directory {}", parent.display())
+            })?;
+        }
+        std::fs::write(output, &bytes)
+            .with_context(|| format!("write benchmark report {}", output.display()))?;
+    }
+    println!("{}", String::from_utf8(bytes)?);
+    Ok(())
+}
+
+fn run_benchmark_preflight(
+    task: &codex_agent_improvement_extension::BenchmarkTask,
+    worktree: &Path,
+) -> bool {
+    let deadline = Instant::now()
+        + Duration::from_millis(
+            task.budget
+                .max_post_run_time_ms
+                .min(MAX_LIVE_PREFLIGHT_TIME_MS),
+        );
+    let mut seen = BTreeSet::<(Vec<String>, i32)>::new();
+    for check in &task.evaluator.checks {
+        let Some(tokens) = check.preflight_command_tokens.as_ref() else {
+            return false;
+        };
+        if !seen.insert((tokens.clone(), check.preflight_expected_exit_code)) {
+            continue;
+        }
+        if !run_bounded_argv_check(
+            tokens,
+            check.preflight_expected_exit_code,
+            worktree,
+            deadline,
+        ) {
+            return false;
+        }
+    }
+    true
+}
+
+fn run_benchmark_fixture_checks(
+    task: &codex_agent_improvement_extension::BenchmarkTask,
+    worktree: &Path,
+) -> (FixtureExecutionStatus, Vec<CheckResult>) {
+    let deadline = Instant::now()
+        + Duration::from_millis(
+            task.budget
+                .max_post_run_time_ms
+                .min(MAX_LIVE_PREFLIGHT_TIME_MS),
+        );
+    let mut status = FixtureExecutionStatus::Completed;
+    let mut checks = Vec::with_capacity(task.evaluator.checks.len());
+    for check in &task.evaluator.checks {
+        match run_bounded_argv_check_outcome(
+            &check.command_tokens,
+            check.expected_exit_code,
+            worktree,
+            deadline,
+        ) {
+            BoundedArgvCheckOutcome::Exited(success) => checks.push(CheckResult {
+                check_id: check.check_id.clone(),
+                success,
+            }),
+            BoundedArgvCheckOutcome::TimedOut => {
+                status = FixtureExecutionStatus::TimedOut;
+                checks.push(CheckResult {
+                    check_id: check.check_id.clone(),
+                    success: false,
+                });
+            }
+            BoundedArgvCheckOutcome::SpawnFailed => {
+                status = FixtureExecutionStatus::SpawnFailed;
+                checks.push(CheckResult {
+                    check_id: check.check_id.clone(),
+                    success: false,
+                });
+            }
+        }
+    }
+    (status, checks)
+}
+
+fn failed_benchmark_checks(
+    task: &codex_agent_improvement_extension::BenchmarkTask,
+) -> Vec<CheckResult> {
+    task.evaluator
+        .checks
+        .iter()
+        .map(|check| CheckResult {
+            check_id: check.check_id.clone(),
+            success: false,
+        })
+        .collect()
+}
+
+fn copy_benchmark_fixture_tree(source: &Path, destination: &Path) -> anyhow::Result<()> {
+    let metadata = std::fs::symlink_metadata(source)
+        .with_context(|| format!("read benchmark fixture {}", source.display()))?;
+    anyhow::ensure!(
+        !metadata.file_type().is_symlink(),
+        "benchmark fixture cannot be a symlink: {}",
+        source.display()
+    );
+    if metadata.is_file() {
+        if let Some(parent) = destination.parent() {
+            std::fs::create_dir_all(parent)?;
+        }
+        std::fs::copy(source, destination).with_context(|| {
+            format!(
+                "copy benchmark fixture file {} to {}",
+                source.display(),
+                destination.display()
+            )
+        })?;
+        std::fs::set_permissions(destination, metadata.permissions())?;
+        return Ok(());
+    }
+    anyhow::ensure!(metadata.is_dir(), "benchmark fixture is not a directory");
+    std::fs::create_dir_all(destination)?;
+    for entry in std::fs::read_dir(source)? {
+        let entry = entry?;
+        copy_benchmark_fixture_tree(&entry.path(), &destination.join(entry.file_name()))?;
+    }
+    Ok(())
+}
+
 fn run_debug_agent_improvement_proposals_command(
     cmd: DebugAgentImprovementProposalsCommand,
 ) -> anyhow::Result<()> {
@@ -2945,12 +3275,12 @@ fn load_promotion_evidence_catalog(
     Ok(catalog)
 }
 
-fn path_identity_for_cli(path: &PathBuf) -> PathBuf {
+fn path_identity_for_cli(path: &Path) -> PathBuf {
     if let Ok(canonical) = std::fs::canonicalize(path) {
         return canonical;
     }
     if path.is_absolute() {
-        path.clone()
+        path.to_path_buf()
     } else {
         std::env::current_dir()
             .unwrap_or_else(|_| PathBuf::from("."))
@@ -3197,6 +3527,18 @@ fn run_debug_agent_improvement_evaluate_command(
     let plan = load_live_evaluation_plan(&cmd.plan)?;
     validate_live_evaluation_request(&brief, &plan, &cmd)?;
 
+    let qualification_report = cmd
+        .qualification_report
+        .as_ref()
+        .map(|path| load_benchmark_qualification_report(path))
+        .transpose()?;
+    if !cmd.dry_run {
+        anyhow::ensure!(
+            qualification_report.is_some(),
+            "a passing --qualification-report is required before live model execution"
+        );
+    }
+
     let source_checkout = path_identity_for_cli(&plan.primary_checkout);
     let run_root = path_identity_for_cli(&cmd.run_root);
     anyhow::ensure!(
@@ -3237,6 +3579,9 @@ fn run_debug_agent_improvement_evaluate_command(
                 "sandbox": "workspace-write",
                 "approval_policy": "never",
                 "automatic_promotion": false,
+                "qualification_report": qualification_report
+                    .as_ref()
+                    .map(|report| report.evaluator_fingerprint.clone()),
             })
         );
         return Ok(());
@@ -3480,6 +3825,82 @@ fn validate_live_evaluation_request(
     Ok(())
 }
 
+fn load_benchmark_qualification_report(
+    path: &Path,
+) -> anyhow::Result<BenchmarkQualificationReport> {
+    let report: BenchmarkQualificationReport = serde_json::from_reader(
+        std::fs::File::open(path)
+            .with_context(|| format!("open benchmark qualification report {}", path.display()))?,
+    )
+    .with_context(|| format!("parse benchmark qualification report {}", path.display()))?;
+    anyhow::ensure!(
+        report.schema_version
+            == codex_agent_improvement_extension::BENCHMARK_QUALIFICATION_REPORT_SCHEMA_VERSION,
+        "unsupported benchmark qualification report schema {}",
+        report.schema_version
+    );
+    anyhow::ensure!(
+        report.evaluator_version == EVALUATOR_VERSION,
+        "benchmark qualification report uses evaluator version {}, expected {}",
+        report.evaluator_version,
+        EVALUATOR_VERSION
+    );
+    anyhow::ensure!(
+        report.no_model_execution,
+        "benchmark qualification report was not produced by the no-model qualifier"
+    );
+    anyhow::ensure!(
+        report.qualified,
+        "benchmark evaluator qualification gate has not passed"
+    );
+    anyhow::ensure!(
+        report.preflight_count == report.preflight_pass_count,
+        "benchmark qualification report contains failed evaluator preflights"
+    );
+    anyhow::ensure!(
+        report.good_fixture_count == report.good_fixture_pass_count,
+        "benchmark qualification report contains a failing good fixture"
+    );
+    anyhow::ensure!(
+        report.negative_fixture_count == report.negative_fixture_detected_count,
+        "benchmark qualification report missed a negative fixture"
+    );
+    anyhow::ensure!(
+        report.targeted_mutant_count == report.targeted_mutant_detected_count,
+        "benchmark qualification report missed a targeted mutant"
+    );
+    anyhow::ensure!(
+        report.execution_failure_count == 0,
+        "benchmark qualification report contains fixture execution failures"
+    );
+    anyhow::ensure!(
+        (codex_agent_improvement_extension::MIN_BENCHMARK_TASKS as u32
+            ..=codex_agent_improvement_extension::MAX_BENCHMARK_TASKS as u32)
+            .contains(&report.task_count),
+        "benchmark qualification report has an invalid task count"
+    );
+    anyhow::ensure!(
+        report.fixture_count > 0
+            && report.fixture_count == report.fixtures.len() as u32
+            && report.preflight_count == report.fixture_count,
+        "benchmark qualification report has incomplete fixture coverage"
+    );
+    anyhow::ensure!(
+        report.task_count == report.tasks.len() as u32
+            && report.tasks.iter().all(|task| task.qualified),
+        "benchmark qualification report has incomplete task coverage"
+    );
+    anyhow::ensure!(
+        report.fixtures.iter().all(|fixture| {
+            fixture.passed
+                && fixture.preflight_passed
+                && fixture.status == FixtureExecutionStatus::Completed
+        }),
+        "benchmark qualification report contains an unqualified fixture"
+    );
+    Ok(report)
+}
+
 fn live_condition(
     trace_bundle: PathBuf,
     worktree: PathBuf,
@@ -3665,12 +4086,31 @@ fn run_bounded_argv_check(
     worktree: &std::path::Path,
     deadline: Instant,
 ) -> bool {
+    matches!(
+        run_bounded_argv_check_outcome(command_tokens, expected_exit_code, worktree, deadline),
+        BoundedArgvCheckOutcome::Exited(true)
+    )
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum BoundedArgvCheckOutcome {
+    Exited(bool),
+    TimedOut,
+    SpawnFailed,
+}
+
+fn run_bounded_argv_check_outcome(
+    command_tokens: &[String],
+    expected_exit_code: i32,
+    worktree: &std::path::Path,
+    deadline: Instant,
+) -> BoundedArgvCheckOutcome {
     let Some((program, arguments)) = command_tokens.split_first() else {
-        return false;
+        return BoundedArgvCheckOutcome::SpawnFailed;
     };
     let remaining = deadline.saturating_duration_since(Instant::now());
     if remaining.is_zero() {
-        return false;
+        return BoundedArgvCheckOutcome::TimedOut;
     }
 
     let mut command = ProcessCommand::new(program);
@@ -3686,14 +4126,16 @@ fn run_bounded_argv_check(
     }
     let child = match command.spawn() {
         Ok(child) => child,
-        Err(_) => return false,
+        Err(_) => return BoundedArgvCheckOutcome::SpawnFailed,
     };
     let max_wait_ms = remaining.as_millis().try_into().unwrap_or(u64::MAX);
-    wait_for_live_condition(child, max_wait_ms)
-        .ok()
-        .flatten()
-        .and_then(|status| status.code())
-        == Some(expected_exit_code)
+    match wait_for_live_condition(child, max_wait_ms) {
+        Ok(Some(status)) => {
+            BoundedArgvCheckOutcome::Exited(status.code() == Some(expected_exit_code))
+        }
+        Ok(None) => BoundedArgvCheckOutcome::TimedOut,
+        Err(_) => BoundedArgvCheckOutcome::SpawnFailed,
+    }
 }
 
 fn wait_for_live_condition(
@@ -5474,6 +5916,94 @@ enabled = true
 
         assert_eq!(command.scenario_set, PathBuf::from("/tmp/scenarios.json"));
         assert_eq!(command.output, PathBuf::from("/tmp/results.json"));
+    }
+
+    #[test]
+    fn debug_agent_improvement_benchmark_parses_validation_qualification_and_calibration() {
+        let cli = MultitoolCli::try_parse_from([
+            "codex",
+            "debug",
+            "agent-improvement",
+            "benchmark",
+            "validate",
+            "/tmp/benchmark.json",
+            "--output",
+            "/tmp/validation.json",
+        ])
+        .expect("parse benchmark validation command");
+        let Some(Subcommand::Debug(DebugCommand {
+            subcommand:
+                DebugSubcommand::AgentImprovement(DebugAgentImprovementCommand {
+                    subcommand:
+                        DebugAgentImprovementSubcommand::Benchmark(
+                            DebugAgentImprovementBenchmarkCommand { subcommand },
+                        ),
+                }),
+        })) = cli.subcommand
+        else {
+            panic!("expected benchmark command");
+        };
+        let DebugAgentImprovementBenchmarkSubcommand::Validate(command) = subcommand else {
+            panic!("expected benchmark validation command");
+        };
+        assert_eq!(command.manifest, PathBuf::from("/tmp/benchmark.json"));
+        assert_eq!(command.output, Some(PathBuf::from("/tmp/validation.json")));
+
+        let cli = MultitoolCli::try_parse_from([
+            "codex",
+            "debug",
+            "agent-improvement",
+            "benchmark",
+            "qualify",
+            "/tmp/benchmark.json",
+            "--run-root",
+            "/tmp/qualification",
+        ])
+        .expect("parse benchmark qualification command");
+        let Some(Subcommand::Debug(DebugCommand {
+            subcommand:
+                DebugSubcommand::AgentImprovement(DebugAgentImprovementCommand {
+                    subcommand:
+                        DebugAgentImprovementSubcommand::Benchmark(
+                            DebugAgentImprovementBenchmarkCommand { subcommand },
+                        ),
+                }),
+        })) = cli.subcommand
+        else {
+            panic!("expected benchmark command");
+        };
+        let DebugAgentImprovementBenchmarkSubcommand::Qualify(command) = subcommand else {
+            panic!("expected benchmark qualification command");
+        };
+        assert_eq!(command.run_root, PathBuf::from("/tmp/qualification"));
+
+        let cli = MultitoolCli::try_parse_from([
+            "codex",
+            "debug",
+            "agent-improvement",
+            "benchmark",
+            "calibrate",
+            "/tmp/benchmark.json",
+            "--baseline",
+            "/tmp/baseline.json",
+        ])
+        .expect("parse benchmark calibration command");
+        let Some(Subcommand::Debug(DebugCommand {
+            subcommand:
+                DebugSubcommand::AgentImprovement(DebugAgentImprovementCommand {
+                    subcommand:
+                        DebugAgentImprovementSubcommand::Benchmark(
+                            DebugAgentImprovementBenchmarkCommand { subcommand },
+                        ),
+                }),
+        })) = cli.subcommand
+        else {
+            panic!("expected benchmark command");
+        };
+        let DebugAgentImprovementBenchmarkSubcommand::Calibrate(command) = subcommand else {
+            panic!("expected benchmark calibration command");
+        };
+        assert_eq!(command.baseline, PathBuf::from("/tmp/baseline.json"));
     }
 
     #[test]
@@ -7420,6 +7950,99 @@ enabled = true
         let failing = scenario("false");
         let failing_scenarios = vec![&failing];
         assert!(run_preflight_checks(&failing_scenarios, worktree.path(), 1_000).is_err());
+    }
+
+    #[test]
+    fn live_evaluation_gate_requires_a_passing_qualified_report() -> anyhow::Result<()> {
+        let temp = tempfile::tempdir()?;
+        let report_path = temp.path().join("qualification.json");
+        let report = BenchmarkQualificationReport {
+            schema_version:
+                codex_agent_improvement_extension::BENCHMARK_QUALIFICATION_REPORT_SCHEMA_VERSION,
+            benchmark_id: "benchmark-v1".to_string(),
+            benchmark_version: "8a3-v1".to_string(),
+            evaluator_version: EVALUATOR_VERSION,
+            evaluator_fingerprint: "sha256:evaluator".to_string(),
+            task_count: codex_agent_improvement_extension::MIN_BENCHMARK_TASKS as u32,
+            fixture_count: 128,
+            preflight_count: 128,
+            preflight_pass_count: 128,
+            good_fixture_count: 32,
+            good_fixture_pass_count: 32,
+            negative_fixture_count: 96,
+            negative_fixture_detected_count: 96,
+            targeted_mutant_count: 32,
+            targeted_mutant_detected_count: 32,
+            execution_failure_count: 0,
+            no_model_execution: true,
+            qualified: true,
+            tasks: (0..32)
+                .map(|index| {
+                    codex_agent_improvement_extension::BenchmarkTaskQualificationResult {
+                        task_id: format!("task-{index:02}"),
+                        family:
+                            codex_agent_improvement_extension::BenchmarkTaskFamily::ParsingEscaping,
+                        fixture_count: 4,
+                        passed_fixture_count: 4,
+                        good_fixture_count: 1,
+                        good_fixture_pass_count: 1,
+                        negative_fixture_count: 3,
+                        negative_fixture_detected_count: 3,
+                        targeted_mutant_count: 1,
+                        targeted_mutant_detected_count: 1,
+                        qualified: true,
+                    }
+                })
+                .collect(),
+            fixtures: (0..32)
+                .flat_map(|index| {
+                    [
+                        (
+                            "good",
+                            codex_agent_improvement_extension::BenchmarkFixtureKind::Good,
+                        ),
+                        (
+                            "no-op",
+                            codex_agent_improvement_extension::BenchmarkFixtureKind::NoOp,
+                        ),
+                        (
+                            "incomplete",
+                            codex_agent_improvement_extension::BenchmarkFixtureKind::Incomplete,
+                        ),
+                        (
+                            "mutant",
+                            codex_agent_improvement_extension::BenchmarkFixtureKind::TargetedMutant,
+                        ),
+                    ]
+                    .into_iter()
+                    .map(move |(kind, kind_value)| {
+                        codex_agent_improvement_extension::FixtureQualificationResult {
+                            task_id: format!("task-{index:02}"),
+                            fixture_id: format!("task-{index:02}-{kind}"),
+                            kind: kind_value,
+                            status: FixtureExecutionStatus::Completed,
+                            preflight_passed: true,
+                            checks: vec![CheckResult {
+                                check_id: "contract".to_string(),
+                                success: kind_value
+                                    == codex_agent_improvement_extension::BenchmarkFixtureKind::Good,
+                            }],
+                            passed: true,
+                            expected_failure_detected: kind_value
+                                != codex_agent_improvement_extension::BenchmarkFixtureKind::Good,
+                        }
+                    })
+                })
+                .collect(),
+        };
+        std::fs::write(&report_path, serde_json::to_vec(&report)?)?;
+        load_benchmark_qualification_report(&report_path)?;
+
+        let mut rejected = report;
+        rejected.qualified = false;
+        std::fs::write(&report_path, serde_json::to_vec(&rejected)?)?;
+        assert!(load_benchmark_qualification_report(&report_path).is_err());
+        Ok(())
     }
 
     #[test]

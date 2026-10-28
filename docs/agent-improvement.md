@@ -427,6 +427,83 @@ deltas; it does not infer that a recommendation was followed.
 Model authentication, network access, runtime, and cost are inherited from the
 operator's Codex environment, so start with a small held-out set.
 
+## Qualify a benchmark before a live run
+
+Milestone 8a.3 adds a private, versioned benchmark contract and a no-model
+qualification gate. Keep the manifest outside published results. Each task
+has a model-visible \`prompt\`, while its seed commit, expected contract,
+reference solution, evaluator commands, evaluator preflights, budgets, and
+fixture worktrees are separate private fields. Pass only the task's
+\`model_visible_context\` projection to a model runner.
+
+The practical benchmark contains 32–48 tasks across at least four task
+families. Every family must have a good fixture, a no-op or incomplete
+fixture, and at least one targeted mutant. Targeted mutants name the checks
+that must fail; a mutant that fails an unrelated check does not qualify.
+
+Inspect a manifest without exposing private prompts or commands:
+
+\`\`\`bash
+codex debug agent-improvement benchmark validate \\
+  /private/path/to/benchmark-v1.json \\
+  --output /private/tmp/benchmark-validation.json
+\`\`\`
+
+Run the evaluator fixtures in fresh temporary copies. This command performs
+argv-only, bounded preflights and checks, never launches a model, never reads
+active cards, and removes its generated copies after writing the report:
+
+\`\`\`bash
+codex debug agent-improvement benchmark qualify \\
+  /private/path/to/benchmark-v1.json \\
+  --run-root /private/tmp/codex-benchmark-qualification \\
+  --output /private/tmp/benchmark-qualification.json
+\`\`\`
+
+The report must have \`qualified = true\`, all preflights and good fixtures
+passing, and every targeted mutant detected before a real live evaluation is
+allowed. A non-dry-run \`evolve evaluate\` therefore requires
+\`--qualification-report\` pointing to this passing report. Dry runs remain
+available for checking the live-plan contract without launching Codex.
+
+Baseline calibration is a separate private input collected with retrieval
+disabled. It must contain exactly one task-level observation per benchmark
+task and the matching source commit and evaluator fingerprint:
+
+\`\`\`json
+{
+  "schema_version": 1,
+  "benchmark_id": "benchmark-v1",
+  "source_commit": "private-commit",
+  "evaluator_version": 1,
+  "evaluator_fingerprint": "sha256:...",
+  "retrieval_enabled": false,
+  "observations": [
+    {
+      "task_id": "task-001",
+      "success": false,
+      "verification_complete": true,
+      "input_tokens": 12000,
+      "output_tokens": 900,
+      "wall_time_ms": 80000
+    }
+  ]
+}
+\`\`\`
+
+Generate the calibration report:
+
+\`\`\`bash
+codex debug agent-improvement benchmark calibrate \\
+  /private/path/to/benchmark-v1.json \\
+  --baseline /private/path/to/baseline-observations.json \\
+  --output /private/tmp/benchmark-baseline.json
+\`\`\`
+
+The qualified difficulty range is 40–75% baseline success. Above 85% is a
+ceiling test; below 25% is too difficult. This report calibrates benchmark
+difficulty only and does not promote cards or establish a treatment effect.
+
 ## Review card adoption
 
 When a selected card is shown to the model, Codex records a bounded exposure

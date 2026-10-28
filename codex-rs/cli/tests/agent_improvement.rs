@@ -3,9 +3,21 @@ use std::path::Path;
 use anyhow::Result;
 use codex_agent_improvement_extension::AgentImprovementEvidence;
 use codex_agent_improvement_extension::AttributionEvidence;
+use codex_agent_improvement_extension::BenchmarkBaselineInput;
+use codex_agent_improvement_extension::BenchmarkBaselineObservation;
+use codex_agent_improvement_extension::BenchmarkDifficulty;
+use codex_agent_improvement_extension::BenchmarkExpectedContract;
+use codex_agent_improvement_extension::BenchmarkFailureMotif;
+use codex_agent_improvement_extension::BenchmarkFixture;
+use codex_agent_improvement_extension::BenchmarkFixtureKind;
+use codex_agent_improvement_extension::BenchmarkManifest;
+use codex_agent_improvement_extension::BenchmarkReferenceSolution;
+use codex_agent_improvement_extension::BenchmarkTask;
+use codex_agent_improvement_extension::BenchmarkTaskFamily;
 use codex_agent_improvement_extension::CandidateTrigger;
 use codex_agent_improvement_extension::EVALUATION_MANIFEST_SCHEMA_VERSION;
 use codex_agent_improvement_extension::EVALUATION_RESULT_SCHEMA_VERSION;
+use codex_agent_improvement_extension::EVALUATOR_VERSION;
 use codex_agent_improvement_extension::EvaluationAggregate;
 use codex_agent_improvement_extension::EvaluationBudget;
 use codex_agent_improvement_extension::EvaluationCondition;
@@ -143,6 +155,8 @@ fn promotion_result(evaluated_at_unix_ms: i64) -> EvaluationResult {
             task_fingerprint: "cli-task-v1".to_string(),
             repository_snapshot_fingerprint: "cli-repo-v1".to_string(),
             evaluator: EvaluatorKind::HumanJudge,
+            evaluator_version: codex_agent_improvement_extension::EVALUATOR_VERSION,
+            evaluator_fingerprint: "evaluator-v1".to_string(),
             baseline: condition(false, false, "cli-baseline-trace"),
             treatment: condition(true, true, "cli-treatment-trace"),
             delta: MetricDelta {
@@ -1159,5 +1173,273 @@ fn evolve_evaluate_dry_run_validates_a_private_held_out_plan() -> Result<()> {
     assert_eq!(dry_run["scenario_count"], 2);
     assert!(!run_root.exists());
     assert!(!output_path.exists());
+    Ok(())
+}
+
+fn benchmark_manifest_fixture(root: &Path) -> Result<BenchmarkManifest> {
+    let families = [
+        BenchmarkTaskFamily::ParsingEscaping,
+        BenchmarkTaskFamily::StatefulBehavior,
+        BenchmarkTaskFamily::ConfigurationCli,
+        BenchmarkTaskFamily::TestDebugRecovery,
+        BenchmarkTaskFamily::RepositoryIntegration,
+    ];
+    let mut tasks = Vec::new();
+    for index in 0..32 {
+        let task_id = format!("task-{index:02}");
+        let task_root = root.join("fixtures").join(&task_id);
+        let fixture = |kind: BenchmarkFixtureKind| -> Result<BenchmarkFixture> {
+            let name = match kind {
+                BenchmarkFixtureKind::Good => "good",
+                BenchmarkFixtureKind::NoOp => "no-op",
+                BenchmarkFixtureKind::Incomplete => "incomplete",
+                BenchmarkFixtureKind::TargetedMutant => "mutant",
+            };
+            let worktree = task_root.join(name);
+            std::fs::create_dir_all(&worktree)?;
+            if kind == BenchmarkFixtureKind::Good {
+                std::fs::write(worktree.join("contract.ok"), b"known-good")?;
+            }
+            Ok(BenchmarkFixture {
+                fixture_id: format!("{task_id}-{name}"),
+                kind,
+                worktree,
+                expected_failed_check_ids: if kind == BenchmarkFixtureKind::TargetedMutant {
+                    vec!["contract".to_string()]
+                } else {
+                    Vec::new()
+                },
+            })
+        };
+        tasks.push(BenchmarkTask {
+            task_id: task_id.clone(),
+            task_fingerprint: format!("task-fingerprint-{index:02}"),
+            family: families[index % families.len()],
+            difficulty: match index % 3 {
+                0 => BenchmarkDifficulty::Easy,
+                1 => BenchmarkDifficulty::Medium,
+                _ => BenchmarkDifficulty::Hard,
+            },
+            failure_motif: BenchmarkFailureMotif::Ordering,
+            seed_commit: "commit-1".to_string(),
+            prompt: format!("Implement the public contract for {task_id} and run its tests."),
+            expected_contract: BenchmarkExpectedContract {
+                contract_id: format!("contract-{task_id}"),
+                summary: "Private expected behavior.".to_string(),
+                private_markers: vec![format!("PRIVATE_EXPECTED_{index:02}")],
+            },
+            reference_solution: BenchmarkReferenceSolution {
+                solution_id: format!("solution-{task_id}"),
+                path: root.join("references").join(&task_id),
+                fingerprint: format!("solution-fingerprint-{index:02}"),
+            },
+            evaluator: EvaluatorSpec {
+                kind: EvaluatorKind::PostRunVerification,
+                checks: vec![VerificationCheck {
+                    check_id: "contract".to_string(),
+                    command_tokens: vec![
+                        "test".to_string(),
+                        "-f".to_string(),
+                        "contract.ok".to_string(),
+                    ],
+                    expected_exit_code: 0,
+                    preflight_command_tokens: Some(vec!["true".to_string()]),
+                    preflight_expected_exit_code: 0,
+                }],
+                require_all_checks: true,
+            },
+            budget: EvaluationBudget::default(),
+            fixtures: vec![
+                fixture(BenchmarkFixtureKind::Good)?,
+                fixture(BenchmarkFixtureKind::NoOp)?,
+                fixture(BenchmarkFixtureKind::Incomplete)?,
+                fixture(BenchmarkFixtureKind::TargetedMutant)?,
+            ],
+        });
+    }
+    Ok(BenchmarkManifest {
+        schema_version: codex_agent_improvement_extension::BENCHMARK_MANIFEST_SCHEMA_VERSION,
+        benchmark_id: "cli-benchmark-v1".to_string(),
+        benchmark_version: "8a3-v1".to_string(),
+        source_commit: "commit-1".to_string(),
+        primary_checkout: Some(root.join("primary")),
+        tasks,
+    })
+}
+
+#[test]
+fn benchmark_commands_validate_qualify_and_calibrate_without_model_execution() -> Result<()> {
+    let home = TempDir::new()?;
+    let root = TempDir::new()?;
+    let manifest = benchmark_manifest_fixture(root.path())?;
+    manifest.validate()?;
+    let primary = root.path().join("primary");
+    std::fs::create_dir_all(&primary)?;
+    std::fs::write(primary.join("sentinel"), b"primary checkout")?;
+    let manifest_path = root.path().join("benchmark.json");
+    std::fs::write(&manifest_path, serde_json::to_vec_pretty(&manifest)?)?;
+
+    let validation_path = root.path().join("validation.json");
+    let mut validate = codex_command(home.path())?;
+    let output = validate
+        .args([
+            "debug",
+            "agent-improvement",
+            "benchmark",
+            "validate",
+            manifest_path.to_str().expect("UTF-8 manifest path"),
+            "--output",
+            validation_path.to_str().expect("UTF-8 validation path"),
+        ])
+        .output()?;
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let validation: Value = serde_json::from_slice(&std::fs::read(&validation_path)?)?;
+    assert_eq!(validation["valid"], true);
+    assert_eq!(validation["task_count"], 32);
+    let validation_text = std::fs::read_to_string(&validation_path)?;
+    assert!(!validation_text.contains("contract.ok"));
+    assert!(!validation_text.contains("PRIVATE_EXPECTED"));
+
+    let qualification_root = root.path().join("qualification-runs");
+    let qualification_path = root.path().join("qualification.json");
+    let mut qualify = codex_command(home.path())?;
+    let output = qualify
+        .args([
+            "debug",
+            "agent-improvement",
+            "benchmark",
+            "qualify",
+            manifest_path.to_str().expect("UTF-8 manifest path"),
+            "--run-root",
+            qualification_root.to_str().expect("UTF-8 run root"),
+            "--output",
+            qualification_path
+                .to_str()
+                .expect("UTF-8 qualification path"),
+        ])
+        .output()?;
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let qualification: Value = serde_json::from_slice(&std::fs::read(&qualification_path)?)?;
+    assert_eq!(qualification["qualified"], true);
+    assert_eq!(qualification["no_model_execution"], true);
+    assert_eq!(qualification["targeted_mutant_count"], 32);
+    assert_eq!(qualification["targeted_mutant_detected_count"], 32);
+    assert!(!std::fs::read_to_string(&qualification_path)?.contains("contract.ok"));
+    assert!(
+        std::fs::read_dir(&qualification_root)?.next().is_none(),
+        "isolated qualification copies should be cleaned up"
+    );
+    assert!(
+        root.path()
+            .join("fixtures")
+            .join("task-00")
+            .join("good")
+            .join("contract.ok")
+            .is_file()
+    );
+    assert_eq!(
+        std::fs::read(primary.join("sentinel"))?,
+        b"primary checkout"
+    );
+
+    let mut bad_preflight_manifest = manifest.clone();
+    for task in &mut bad_preflight_manifest.tasks {
+        for check in &mut task.evaluator.checks {
+            check.preflight_command_tokens = Some(vec!["false".to_string()]);
+        }
+    }
+    let bad_manifest_path = root.path().join("bad-preflight-benchmark.json");
+    std::fs::write(
+        &bad_manifest_path,
+        serde_json::to_vec_pretty(&bad_preflight_manifest)?,
+    )?;
+    let bad_qualification_path = root.path().join("bad-qualification.json");
+    let bad_run_root = root.path().join("bad-qualification-runs");
+    let mut bad_qualify = codex_command(home.path())?;
+    let output = bad_qualify
+        .args([
+            "debug",
+            "agent-improvement",
+            "benchmark",
+            "qualify",
+            bad_manifest_path.to_str().expect("UTF-8 bad manifest path"),
+            "--run-root",
+            bad_run_root.to_str().expect("UTF-8 bad run root"),
+            "--output",
+            bad_qualification_path
+                .to_str()
+                .expect("UTF-8 bad qualification path"),
+        ])
+        .output()?;
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let bad_qualification: Value =
+        serde_json::from_slice(&std::fs::read(&bad_qualification_path)?)?;
+    assert_eq!(bad_qualification["qualified"], false);
+    assert_eq!(bad_qualification["preflight_pass_count"], 0);
+    assert_eq!(bad_qualification["execution_failure_count"], 128);
+    assert!(
+        std::fs::read_dir(&bad_run_root)?.next().is_none(),
+        "failed qualification copies should also be cleaned up"
+    );
+
+    let baseline = BenchmarkBaselineInput {
+        schema_version: codex_agent_improvement_extension::BENCHMARK_BASELINE_INPUT_SCHEMA_VERSION,
+        benchmark_id: manifest.benchmark_id.clone(),
+        source_commit: manifest.source_commit.clone(),
+        evaluator_version: EVALUATOR_VERSION,
+        evaluator_fingerprint: manifest.evaluator_fingerprint(),
+        retrieval_enabled: false,
+        observations: manifest
+            .tasks
+            .iter()
+            .enumerate()
+            .map(|(index, task)| BenchmarkBaselineObservation {
+                task_id: task.task_id.clone(),
+                success: index < 18,
+                verification_complete: index % 3 != 0,
+                input_tokens: 100,
+                output_tokens: 20,
+                wall_time_ms: 1_000,
+            })
+            .collect(),
+    };
+    let baseline_path = root.path().join("baseline.json");
+    std::fs::write(&baseline_path, serde_json::to_vec_pretty(&baseline)?)?;
+    let calibration_path = root.path().join("calibration.json");
+    let mut calibrate = codex_command(home.path())?;
+    let output = calibrate
+        .args([
+            "debug",
+            "agent-improvement",
+            "benchmark",
+            "calibrate",
+            manifest_path.to_str().expect("UTF-8 manifest path"),
+            "--baseline",
+            baseline_path.to_str().expect("UTF-8 baseline path"),
+            "--output",
+            calibration_path.to_str().expect("UTF-8 calibration path"),
+        ])
+        .output()?;
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let calibration: Value = serde_json::from_slice(&std::fs::read(&calibration_path)?)?;
+    assert_eq!(calibration["qualified"], true);
+    assert_eq!(calibration["success_rate_bps"], 5625);
+    assert_eq!(calibration["tasks"].as_array().map(Vec::len), Some(32));
     Ok(())
 }

@@ -38,7 +38,9 @@ use crate::summarize_rollout;
 /// Version of the local scenario manifest contract.
 pub const EVALUATION_MANIFEST_SCHEMA_VERSION: u32 = 2;
 /// Version of the aggregate result contract.
-pub const EVALUATION_RESULT_SCHEMA_VERSION: u32 = 3;
+pub const EVALUATION_RESULT_SCHEMA_VERSION: u32 = 4;
+/// Version of the deterministic evaluator contract included in every result.
+pub const EVALUATOR_VERSION: u32 = 1;
 
 const MAX_SCENARIOS: usize = 512;
 const MAX_CHECKS: usize = 16;
@@ -214,6 +216,22 @@ pub struct EvaluatorSpec {
     /// For multiple checks, require all (`true`) or at least one (`false`).
     #[serde(default = "default_require_all_checks")]
     pub require_all_checks: bool,
+}
+
+impl EvaluatorSpec {
+    /// Stable evaluator implementation version recorded with live results.
+    pub const fn version(&self) -> u32 {
+        EVALUATOR_VERSION
+    }
+
+    /// Stable opaque identity for this evaluator definition. The command
+    /// tokens are hash input only and never appear in published results.
+    pub fn fingerprint(&self) -> String {
+        crate::fingerprint_descriptor(
+            "evaluator-definition-v1",
+            &serde_json::to_string(self).unwrap_or_default(),
+        )
+    }
 }
 
 fn default_require_all_checks() -> bool {
@@ -676,6 +694,8 @@ fn evaluate_scenario(scenario: &EvaluationScenario) -> EvaluationScenarioResult 
         task_fingerprint: scenario.task.fingerprint.clone(),
         repository_snapshot_fingerprint: scenario.repository.snapshot_fingerprint.clone(),
         evaluator: scenario.evaluator.kind,
+        evaluator_version: scenario.evaluator.version(),
+        evaluator_fingerprint: scenario.evaluator.fingerprint(),
         baseline,
         treatment,
         delta,
@@ -1397,6 +1417,10 @@ pub struct EvaluationScenarioResult {
     pub task_fingerprint: String,
     pub repository_snapshot_fingerprint: String,
     pub evaluator: EvaluatorKind,
+    #[serde(default)]
+    pub evaluator_version: u32,
+    #[serde(default)]
+    pub evaluator_fingerprint: String,
     pub baseline: EvaluationConditionResult,
     pub treatment: EvaluationConditionResult,
     pub delta: MetricDelta,
