@@ -7,12 +7,18 @@ use codex_agent_improvement_extension::AttributionState;
 use codex_agent_improvement_extension::CandidateStatus;
 use codex_agent_improvement_extension::ExperienceCandidate;
 use codex_agent_improvement_extension::FeedbackState;
+use codex_agent_improvement_extension::ImprovementCandidate;
+use codex_agent_improvement_extension::ImprovementCandidateStatus;
+use codex_agent_improvement_extension::ImprovementEvidenceCatalog;
 use codex_agent_improvement_extension::append_card;
+use codex_agent_improvement_extension::candidates_path;
+use codex_agent_improvement_extension::cards_path;
 use codex_agent_improvement_extension::evaluate_manifest;
 use codex_agent_improvement_extension::find_candidate;
 use codex_agent_improvement_extension::load_candidates;
 use codex_agent_improvement_extension::load_cards;
 use codex_agent_improvement_extension::load_evaluation_manifest;
+use codex_agent_improvement_extension::load_improvement_candidate;
 use codex_agent_improvement_extension::record_card_feedback;
 use codex_agent_improvement_extension::record_card_outcome;
 use codex_agent_improvement_extension::render_cards;
@@ -21,6 +27,7 @@ use codex_agent_improvement_extension::select_relevant;
 use codex_agent_improvement_extension::summarize_rollout;
 use codex_agent_improvement_extension::update_candidate_status;
 use codex_agent_improvement_extension::write_evaluation_result;
+use codex_agent_improvement_extension::write_improvement_candidate;
 use codex_app_server_daemon::BootstrapOptions as AppServerBootstrapOptions;
 use codex_app_server_daemon::LifecycleCommand as AppServerLifecycleCommand;
 use codex_app_server_daemon::RemoteControlMode as AppServerRemoteControlMode;
@@ -350,6 +357,9 @@ enum DebugAgentImprovementSubcommand {
     /// Evaluate paired baseline and memory-assisted rollout bundles.
     Eval(DebugAgentImprovementEvalCommand),
 
+    /// Draft and validate review-only improvement artifacts.
+    Proposals(DebugAgentImprovementProposalsCommand),
+
     /// Summarize a local rollout bundle into one bounded experience card.
     Summarize(DebugAgentImprovementSummarizeCommand),
 
@@ -372,6 +382,59 @@ struct DebugAgentImprovementEvalCommand {
     /// Write the redacted aggregate result to this file.
     #[arg(long = "output", short = 'o', value_name = "RESULTS", required = true)]
     output: PathBuf,
+}
+
+#[derive(Debug, Parser)]
+struct DebugAgentImprovementProposalsCommand {
+    #[command(subcommand)]
+    subcommand: DebugAgentImprovementProposalsSubcommand,
+}
+
+#[derive(Debug, clap::Subcommand)]
+enum DebugAgentImprovementProposalsSubcommand {
+    /// Draft a review-only experience-card proposal from a pending candidate.
+    DraftCard(DebugAgentImprovementProposalDraftCardCommand),
+
+    /// Validate a proposal, optionally against candidate and evaluation evidence.
+    Validate(DebugAgentImprovementProposalValidateCommand),
+}
+
+#[derive(Debug, Parser)]
+struct DebugAgentImprovementProposalDraftCardCommand {
+    /// Candidate store directory containing candidates.jsonl.
+    #[arg(long = "store", value_name = "DIR", required = true)]
+    store: PathBuf,
+
+    /// Stable pending candidate ID.
+    #[arg(value_name = "CANDIDATE_ID")]
+    candidate_id: String,
+
+    /// Held-out evaluation scenario that must validate the proposal later.
+    #[arg(
+        long = "evaluation-scenario",
+        value_name = "SCENARIO_ID",
+        required = true
+    )]
+    evaluation_scenario_id: String,
+
+    /// Write the review-only proposal to this file.
+    #[arg(long = "output", short = 'o', value_name = "FILE", required = true)]
+    output: PathBuf,
+}
+
+#[derive(Debug, Parser)]
+struct DebugAgentImprovementProposalValidateCommand {
+    /// Proposal JSON file.
+    #[arg(value_name = "PROPOSAL")]
+    proposal: PathBuf,
+
+    /// Candidate store used to verify candidate, card, and trace evidence.
+    #[arg(long = "candidate-store", value_name = "DIR")]
+    candidate_store: Option<PathBuf>,
+
+    /// Redacted evaluation result JSON files used to verify scenario evidence.
+    #[arg(long = "evaluation-results", value_name = "FILE")]
+    evaluation_results: Vec<PathBuf>,
 }
 
 #[derive(Debug, Parser)]
@@ -2058,6 +2121,9 @@ async fn cli_main(
                     DebugAgentImprovementSubcommand::Eval(cmd) => {
                         run_debug_agent_improvement_eval_command(cmd)?;
                     }
+                    DebugAgentImprovementSubcommand::Proposals(cmd) => {
+                        run_debug_agent_improvement_proposals_command(cmd)?;
+                    }
                     DebugAgentImprovementSubcommand::Summarize(cmd) => {
                         run_debug_agent_improvement_summarize_command(cmd).await?;
                     }
@@ -2315,6 +2381,67 @@ fn run_debug_agent_improvement_eval_command(
     let result = evaluate_manifest(&manifest)?;
     write_evaluation_result(&manifest, &result, &cmd.output)?;
     println!("{}", serde_json::to_string_pretty(&result)?);
+    Ok(())
+}
+
+fn run_debug_agent_improvement_proposals_command(
+    cmd: DebugAgentImprovementProposalsCommand,
+) -> anyhow::Result<()> {
+    match cmd.subcommand {
+        DebugAgentImprovementProposalsSubcommand::DraftCard(cmd) => {
+            let candidate = require_pending_candidate(&cmd.store, &cmd.candidate_id)?;
+            let proposal = ImprovementCandidate::from_experience_candidate(
+                &candidate,
+                cmd.evaluation_scenario_id,
+            )?;
+            let output_identity = path_identity_for_cli(&cmd.output);
+            anyhow::ensure!(
+                output_identity != path_identity_for_cli(&candidates_path(&cmd.store))
+                    && output_identity != path_identity_for_cli(&cards_path(&cmd.store)),
+                "proposal output must not overwrite the candidate or active-card store"
+            );
+            write_improvement_candidate(&proposal, &cmd.output)?;
+            println!("{}", serde_json::to_string_pretty(&proposal)?);
+        }
+        DebugAgentImprovementProposalsSubcommand::Validate(cmd) => {
+            let proposal = load_improvement_candidate(&cmd.proposal)?;
+            let has_evidence_inputs =
+                cmd.candidate_store.is_some() || !cmd.evaluation_results.is_empty();
+            if has_evidence_inputs {
+                let mut catalog = cmd
+                    .candidate_store
+                    .as_ref()
+                    .map(|store| {
+                        load_candidates(store).map(|candidates| {
+                            ImprovementEvidenceCatalog::from_candidates(&candidates)
+                        })
+                    })
+                    .transpose()?
+                    .unwrap_or_default();
+                for result_path in cmd.evaluation_results {
+                    let file = std::fs::File::open(&result_path).map_err(|error| {
+                        anyhow::anyhow!("open evaluation result {}: {error}", result_path.display())
+                    })?;
+                    let result: codex_agent_improvement_extension::EvaluationResult =
+                        serde_json::from_reader(file).map_err(|error| {
+                            anyhow::anyhow!(
+                                "parse evaluation result {}: {error}",
+                                result_path.display()
+                            )
+                        })?;
+                    catalog.add_evaluation_result(&result)?;
+                }
+                proposal.validate_against(&catalog)?;
+            } else {
+                proposal.validate()?;
+            }
+            anyhow::ensure!(
+                proposal.status == ImprovementCandidateStatus::Proposed,
+                "proposal is not in the review-only proposed state"
+            );
+            println!("{}", serde_json::to_string_pretty(&proposal)?);
+        }
+    }
     Ok(())
 }
 
@@ -3995,6 +4122,83 @@ enabled = true
 
         assert_eq!(command.scenario_set, PathBuf::from("/tmp/scenarios.json"));
         assert_eq!(command.output, PathBuf::from("/tmp/results.json"));
+    }
+
+    #[test]
+    fn debug_agent_improvement_proposals_parses_draft_and_validation_commands() {
+        let cli = MultitoolCli::try_parse_from([
+            "codex",
+            "debug",
+            "agent-improvement",
+            "proposals",
+            "draft-card",
+            "--store",
+            "/tmp/agent-improvement",
+            "candidate_123",
+            "--evaluation-scenario",
+            "scenario_held_out",
+            "--output",
+            "/tmp/proposal.json",
+        ])
+        .expect("parse proposal draft command");
+
+        let Some(Subcommand::Debug(DebugCommand {
+            subcommand:
+                DebugSubcommand::AgentImprovement(DebugAgentImprovementCommand {
+                    subcommand:
+                        DebugAgentImprovementSubcommand::Proposals(
+                            DebugAgentImprovementProposalsCommand { subcommand },
+                        ),
+                }),
+        })) = cli.subcommand
+        else {
+            panic!("expected proposal command");
+        };
+        let DebugAgentImprovementProposalsSubcommand::DraftCard(command) = subcommand else {
+            panic!("expected proposal draft command");
+        };
+        assert_eq!(command.store, PathBuf::from("/tmp/agent-improvement"));
+        assert_eq!(command.candidate_id, "candidate_123");
+        assert_eq!(command.evaluation_scenario_id, "scenario_held_out");
+        assert_eq!(command.output, PathBuf::from("/tmp/proposal.json"));
+
+        let cli = MultitoolCli::try_parse_from([
+            "codex",
+            "debug",
+            "agent-improvement",
+            "proposals",
+            "validate",
+            "/tmp/proposal.json",
+            "--candidate-store",
+            "/tmp/agent-improvement",
+            "--evaluation-results",
+            "/tmp/results.json",
+        ])
+        .expect("parse proposal validation command");
+        let Some(Subcommand::Debug(DebugCommand {
+            subcommand:
+                DebugSubcommand::AgentImprovement(DebugAgentImprovementCommand {
+                    subcommand:
+                        DebugAgentImprovementSubcommand::Proposals(
+                            DebugAgentImprovementProposalsCommand { subcommand },
+                        ),
+                }),
+        })) = cli.subcommand
+        else {
+            panic!("expected proposal validation command");
+        };
+        let DebugAgentImprovementProposalsSubcommand::Validate(command) = subcommand else {
+            panic!("expected proposal validation command");
+        };
+        assert_eq!(command.proposal, PathBuf::from("/tmp/proposal.json"));
+        assert_eq!(
+            command.candidate_store,
+            Some(PathBuf::from("/tmp/agent-improvement"))
+        );
+        assert_eq!(
+            command.evaluation_results,
+            vec![PathBuf::from("/tmp/results.json")]
+        );
     }
 
     #[test]

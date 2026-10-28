@@ -9,6 +9,7 @@ mod candidates;
 mod capture;
 mod eval;
 mod extension;
+mod improvement;
 mod schema;
 mod store;
 mod summarize;
@@ -31,6 +32,13 @@ pub use eval::{
     evaluate_manifest_at, load_evaluation_manifest, write_evaluation_result,
 };
 pub use extension::{AgentImprovementExtensionConfig, install};
+pub use improvement::{
+    IMPROVEMENT_CANDIDATE_SCHEMA_VERSION, ImprovementCandidate, ImprovementCandidateStatus,
+    ImprovementCandidateType, ImprovementContent, ImprovementEvidenceCatalog,
+    ImprovementEvidenceKind, ImprovementEvidenceReference, ImprovementExpiry, ImprovementRollback,
+    ImprovementTarget, ImprovementValidationKind, ImprovementValidationRequirement,
+    load_improvement_candidate, write_improvement_candidate,
+};
 pub use schema::{
     AdoptionEvidence, AgentImprovementEvidence, AttributionState, CardStatus, ConfidenceLevel,
     EXPERIENCE_CARD_SCHEMA_VERSION, EvidenceFact, EvidenceProfile, ExitBucket, ExperienceCard,

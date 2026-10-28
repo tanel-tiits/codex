@@ -128,6 +128,52 @@ The embedded agent-card-curator Skill provides a conversational review workflow
 around these commands. It must receive explicit user approval before accepting
 a candidate.
 
+## Draft a review-only improvement proposal
+
+Milestone 5 adds a slow-path proposal artifact. Drafting is deterministic and
+currently supports an experience-card update; the versioned envelope also
+defines lanes for a focused Skill, an \`AGENTS.md\` patch, a prompt/extension
+configuration change, and a diagnostic tooling issue. None of these artifacts
+is applied automatically or injected into a turn.
+
+Draft from one pending candidate and name the held-out scenario that must be
+used to evaluate it:
+
+\`\`\`bash
+codex debug agent-improvement proposals draft-card \\
+  --store "$CODEX_HOME/agent-improvement" \\
+  candidate_<ID> \\
+  --evaluation-scenario <SCENARIO_ID> \\
+  --output /tmp/improvement-proposal.json
+\`\`\`
+
+Perform structural validation before review:
+
+\`\`\`bash
+codex debug agent-improvement proposals validate \\
+  /tmp/improvement-proposal.json
+\`\`\`
+
+When the candidate store and a redacted Milestone 4 result are available, also
+verify that every evidence identifier exists:
+
+\`\`\`bash
+codex debug agent-improvement proposals validate \\
+  /tmp/improvement-proposal.json \\
+  --candidate-store "$CODEX_HOME/agent-improvement" \\
+  --evaluation-results /path/to/evaluation-results.json
+\`\`\`
+
+The proposal records its target scope, evidence IDs, rationale, expected
+benefit, costs, risks, validation plan, expiry, and rollback intent. Validation
+rejects oversized or instruction-like content, raw paths and secret-like
+markers, dangerous commands, scope contradictions, permission/sandbox changes,
+and patches outside a relative \`AGENTS.md\` path. Validation records what must
+be checked; it does not run commands. A proposal remains separate from
+\`candidates.jsonl\` and \`cards.jsonl\`, so explicit card acceptance is still
+the only Milestone 1–3 activation boundary. Promotion of non-card artifacts is
+not implemented until Milestone 6.
+
 ## Review card adoption
 
 When a selected card is shown to the model, Codex records a bounded exposure

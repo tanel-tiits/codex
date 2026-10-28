@@ -1,7 +1,7 @@
 # Agent Improvement Integration Plan
 
-Status: Milestone 4 offline replay/evaluation core complete; Milestones 1–3
-complete; live model-runner execution and Milestones 5–8 remain gated
+Status: Milestone 5 review-only proposer core complete; Milestones 1–4
+complete; live model-runner execution and Milestones 6–8 remain gated
 
 ## Objective
 
@@ -85,7 +85,7 @@ privacy, provenance, rollback, and human-review boundaries.
 
 ## Roadmap and milestones
 
-Milestones 1–4 are implemented in this working tree. Milestone 4 intentionally
+Milestones 1–5 are implemented in this working tree. Milestone 4 intentionally
 lands as an offline replay/evaluation core: it consumes matched artifacts
 produced by separately controlled baseline and treatment runs. Launching live
 model runs from the evaluator remains a separately gated safety increment. The
@@ -100,7 +100,7 @@ gate and regression evidence must also be satisfied.
 | 2. Automatic candidate capture and review | Long sessions produce reviewable candidates without requiring a manual CLI step; nothing is promoted automatically | Immediately next | 1 | Complete |
 | 3. Evidence-rich lessons and retrieval | Cards describe recurring failure signatures, interventions, outcomes, scope, and confidence rather than only coarse summaries | High value | 2 | Complete |
 | 4. Replay and evaluation harness | Baseline versus memory-assisted artifacts can be measured on paired and held-out tasks with bounded provenance and cost accounting | Essential before autonomy | 2–3 | Offline core complete; live runner gated |
-| 5. Offline proposer and candidate artifacts | A focused skill or offline model call can propose cards, skills, or guidance diffs for review | High value | 3–4 | Planned |
+| 5. Offline proposer and candidate artifacts | A focused Skill and deterministic offline command can produce evidence-linked, review-only proposals for cards and bounded guidance/tooling changes | High value | 3–4 | Review-only core complete; live model proposer gated |
 | 6. Promotion, rollback, and policy control plane | Candidate changes become versioned, scoped, reversible active knowledge only after evidence and review | Essential | 4–5 | Planned |
 | 7. Slow loop for long-horizon improvement | Periodic analysis finds recurring patterns, stale knowledge, and missed evidence, then proposes the next experiments | High value / research | 4–6 | Planned |
 | 8. Optional program-level evolution and transfer | Isolated evolution of skills, prompts, or extension policy can be explored across task families without mutating the live agent | Research only | 6–7 | Planned |
@@ -355,6 +355,10 @@ review.
 
 ### Milestone 5 — Offline proposer and candidate artifacts
 
+**Implementation status: review-only proposal envelope, deterministic card
+drafting, evidence validation, and curator Skill workflow complete; live model
+proposer and artifact application remain gated.**
+
 **Intent:** use Codex itself, a focused Skill, or an offline model call to
   propose better lessons and operating guidance without giving that proposer
   direct control of the live agent.
@@ -372,8 +376,12 @@ review.
   - diagnostic/tooling issue that should be fixed in Codex code.
 - Start with the `agent-card-curator` Skill as the user-facing proposer. It
   can summarize candidates, ask Codex to draft a bounded improvement, and
-  produce a reviewable artifact. Add a dedicated offline proposer command only
-  after the candidate schema and evaluator are stable.
+  produces a reviewable artifact. The deterministic command
+  `codex debug agent-improvement proposals draft-card` now creates a card
+  proposal from one pending candidate; `proposals validate` performs structural
+  and optional evidence-catalog validation. A future offline model adapter may
+  produce the other artifact lanes, but it remains a separate slow-path
+  permission and privacy review.
 - Keep the proposer on the slow path: it may read reduced, redacted evidence
   and selected trace references, but it must not run in every turn or alter
   permissions, approval policy, sandbox policy, system instructions, or
@@ -394,6 +402,13 @@ review.
 - evaluator integration tests proving a candidate references real evidence and
   executable checks;
 - curator Skill tests for explicit approval, rejection, and cancellation.
+
+The implemented core covers valid, malformed, oversized, contradictory, and
+adversarial proposal fixtures across all five artifact lanes; redaction and
+read-only serialization; deterministic IDs; evidence-catalog validation;
+candidate-store immutability during drafting; CLI parser and end-to-end draft
+and validation tests; and embedded Skill asset validation. It does not yet
+invoke a model or apply a generated diff.
 
 **Exit gate:** a proposer can generate reviewable, evidence-linked artifacts
   and a test plan. No proposed artifact influences live behavior until the
@@ -987,3 +1002,7 @@ cross-task evidence.
 | 4.1 Evaluation manifest and pairing contract | complete | Versioned private scenario manifest, held-out split requirement, exact config/policy/card provenance, worktree disjointness, and protected output paths |
 | 4.2 Offline replay metrics and evaluators | complete | Reduced-trace replay metrics for verification, failure/retry, tool/terminal work, tokens, latency, cancellation, policy events, corrections, deterministic checks, and labeled judge inputs |
 | 4.3 Result schema, CLI, tests, and usage docs | complete | Redacted aggregate results, partial/cost-limited states, false-attribution tests, 50 extension tests, 6 CLI integration tests, and paired-evaluation documentation |
+| 5.1 Review-only proposal envelope | complete | Versioned card, Skill, `AGENTS.md`, configuration, and diagnostic lanes with bounded content, target scope, expiry, rollback, and strict safety validation |
+| 5.2 Evidence-linked deterministic card proposer | complete | Stable card proposal IDs, candidate/card/trace/scenario references, concrete held-out validation requirement, and evidence-catalog checks |
+| 5.3 Curator Skill and CLI workflow | complete | `agent-card-curator` drafting/validation workflow; read-only `proposals draft-card` and `proposals validate` commands; no active-store mutation |
+| 5.4 Milestone 5 validation | complete | 56 extension tests, 7 CLI integration tests, 5 CLI parser tests, Skill tests, formatting, and diff checks; live model proposer remains gated |

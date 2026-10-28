@@ -778,11 +778,14 @@ impl FailureSignature {
             FailureClass::Completed => OperationClass::None,
             FailureClass::Cancelled | FailureClass::Unknown => OperationClass::Unknown,
         };
-        let policy_reason = signals
+        let policy_reason = if signals
             .iter()
             .any(|signal| signal == "policy_boundary_observed")
-            .then_some(PolicyReason::Other)
-            .unwrap_or_default();
+        {
+            PolicyReason::Other
+        } else {
+            PolicyReason::default()
+        };
         let verification_state = if evidence.failed_verification_count > 0 {
             VerificationState::Failed
         } else if evidence.verification_step_count > 0 {
@@ -831,7 +834,7 @@ impl ExperienceScope {
         }
     }
 
-    fn is_bounded(&self) -> bool {
+    pub(crate) fn is_bounded(&self) -> bool {
         self.workspace_key
             .as_deref()
             .is_none_or(is_valid_workspace_key)
@@ -1024,7 +1027,7 @@ impl ExperienceCard {
             &evidence_profile,
         );
         let lesson_id = digest_id("lesson_", &content_identity);
-        let card_id = digest_id("card_", &format!("{}\u{1f}{}", source_trace_id, lesson_id));
+        let card_id = digest_id("card_", &format!("{source_trace_id}\u{1f}{lesson_id}"));
 
         Self {
             schema_version: EXPERIENCE_CARD_SCHEMA_VERSION,

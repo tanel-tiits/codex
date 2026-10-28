@@ -452,6 +452,90 @@ fn candidate_rejection_keeps_the_card_inactive() -> Result<()> {
 }
 
 #[test]
+fn proposal_drafting_is_read_only_and_evidence_validation_is_explicit() -> Result<()> {
+    let home = TempDir::new()?;
+    let store = home.path().join("agent-improvement");
+    let card = ExperienceCard::new(
+        "trace-proposal-cli",
+        100,
+        TaskFamily::Coding,
+        FailureClass::CommandFailure,
+        AgentImprovementEvidence::default(),
+        vec!["command_failed".to_string()],
+        "Reproduce the first failing command.",
+        vec!["reproduce_first_failing_command".to_string()],
+    );
+    let candidate = ExperienceCandidate::from_card(card, 100, CandidateTrigger::ThreadStop, None);
+    append_candidate(&store, &candidate, 8)?;
+    let candidate_store_before = std::fs::read(store.join("candidates.jsonl"))?;
+    let proposal_path = home.path().join("proposal.json");
+
+    let mut draft = codex_command(home.path())?;
+    let output = draft
+        .args([
+            "debug",
+            "agent-improvement",
+            "proposals",
+            "draft-card",
+            "--store",
+            store.to_str().expect("UTF-8 store path"),
+            &candidate.candidate_id,
+            "--evaluation-scenario",
+            "scenario-held-out",
+            "--output",
+            proposal_path.to_str().expect("UTF-8 proposal path"),
+        ])
+        .output()?;
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let proposal: Value = serde_json::from_slice(&std::fs::read(&proposal_path)?)?;
+    assert_eq!(proposal["status"], "proposed");
+    assert_eq!(proposal["candidate_type"], "experience_card_update");
+    assert_eq!(
+        std::fs::read(store.join("candidates.jsonl"))?,
+        candidate_store_before
+    );
+    assert!(!store.join("cards.jsonl").exists());
+
+    let mut structural_validate = codex_command(home.path())?;
+    let output = structural_validate
+        .args([
+            "debug",
+            "agent-improvement",
+            "proposals",
+            "validate",
+            proposal_path.to_str().expect("UTF-8 proposal path"),
+        ])
+        .output()?;
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+
+    let mut evidence_validate = codex_command(home.path())?;
+    let output = evidence_validate
+        .args([
+            "debug",
+            "agent-improvement",
+            "proposals",
+            "validate",
+            proposal_path.to_str().expect("UTF-8 proposal path"),
+            "--candidate-store",
+            store.to_str().expect("UTF-8 store path"),
+        ])
+        .output()?;
+    assert!(!output.status.success());
+    assert!(String::from_utf8_lossy(&output.stderr).contains("missing improvement evidence"));
+    assert!(!store.join("cards.jsonl").exists());
+
+    Ok(())
+}
+
+#[test]
 fn card_lifecycle_commands_record_adoption_and_retirement() -> Result<()> {
     let home = TempDir::new()?;
     let store = home.path().join("agent-improvement");
