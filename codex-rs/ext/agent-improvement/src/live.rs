@@ -110,6 +110,11 @@ impl LiveEvaluationPlan {
                 "live evaluation scenario {} exceeds the two-hour wall-time limit",
                 scenario.scenario_id
             );
+            ensure!(
+                scenario.budget.max_post_run_time_ms <= MAX_LIVE_WALL_TIME_MS,
+                "live evaluation scenario {} exceeds the two-hour post-run limit",
+                scenario.scenario_id
+            );
         }
         Ok(())
     }
@@ -303,6 +308,10 @@ mod tests {
 
         plan.scenarios[0].scenario_id = "scenario-1".to_string();
         plan.scenarios[0].budget.max_wall_time_ms = MAX_LIVE_WALL_TIME_MS + 1;
+        assert!(plan.validate().is_err());
+
+        plan.scenarios[0].budget.max_wall_time_ms = EvaluationBudget::default().max_wall_time_ms;
+        plan.scenarios[0].budget.max_post_run_time_ms = MAX_LIVE_WALL_TIME_MS + 1;
         assert!(plan.validate().is_err());
     }
 

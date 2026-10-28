@@ -319,10 +319,10 @@ workflow remain required.
 
 ## Run a live held-out evaluation
 
-Milestone 8a adds a manual bridge from an experiment brief to paired live
-Codex runs. It is useful when a deterministic brief is ready for a real test,
-but it is intentionally outside normal turn preparation and never promotes a
-card automatically.
+Milestones 8a and 8a.1 add a manual bridge from an experiment brief to paired
+live Codex runs. It is useful when a deterministic brief is ready for a real
+test, but it is intentionally outside normal turn preparation and never
+promotes a card automatically.
 
 First generate and inspect the brief report:
 
@@ -354,8 +354,14 @@ paths. Its essential shape is:
         "fingerprint": "sha256:<task fingerprint>"
       },
       "evaluator": {
-        "kind": "trace_outcome",
-        "checks": [],
+        "kind": "post_run_verification",
+        "checks": [
+          {
+            "check_id": "hidden-contract",
+            "command_tokens": ["python3", "private_hidden_tests.py"],
+            "expected_exit_code": 0
+          }
+        ],
         "require_all_checks": true
       },
       "budget": {
@@ -363,7 +369,8 @@ paths. Its essential shape is:
         "max_tokens": 2000000,
         "max_wall_time_ms": 1800000,
         "max_tool_calls": 512,
-        "max_terminal_operations": 512
+        "max_terminal_operations": 512,
+        "max_post_run_time_ms": 120000
       }
     }
   ]
@@ -395,10 +402,15 @@ evaluator after each run. Successful runs clean up their worktrees; add
 `--keep-worktrees` when investigating a failed study.
 
 The output is a redacted aggregate result suitable for the offline evaluator.
-It does not contain prompts, paths, command tokens, or raw model output. To
-record the derived outcome in the brief history, only after inspecting the
-result, add `--record-outcome --actor <ACTOR>`. This records measured task or
-verification deltas; it does not infer that a recommendation was followed.
+It does not contain prompts, paths, command tokens, or raw model output. With
+`post_run_verification`, checks execute after the child exits, in the isolated
+condition worktree, as argv tokens without a shell, with a scrubbed
+environment, and before normal worktree cleanup. Only check IDs and boolean
+results enter the redacted output. Results also separate `trace_status` and
+`policy_status` from the evaluator's coding outcome. To record the derived
+outcome in the brief history, only after inspecting the result, add
+`--record-outcome --actor <ACTOR>`. This records measured task or verification
+deltas; it does not infer that a recommendation was followed.
 Model authentication, network access, runtime, and cost are inherited from the
 operator's Codex environment, so start with a small held-out set.
 
@@ -495,7 +507,7 @@ scenario has this shape:
         }
       },
       "evaluator": {
-        "kind": "verification",
+        "kind": "post_run_verification",
         "checks": [
           {
             "check_id": "tests",
@@ -510,7 +522,8 @@ scenario has this shape:
         "max_tokens": 2000000,
         "max_wall_time_ms": 1800000,
         "max_tool_calls": 512,
-        "max_terminal_operations": 512
+        "max_terminal_operations": 512,
+        "max_post_run_time_ms": 120000
       }
     }
   ]
@@ -531,14 +544,15 @@ codex debug agent-improvement eval \
   --output /private/path/to/evaluation-results.json
 ~~~
 
-Results contain scenario IDs, opaque provenance fingerprints, verification
-outcomes, failure classes, retries, tool and terminal counts, tokens, wall
-time, cancellation, policy events, held-out aggregates, and per-task-family
-aggregates. They do not contain prompts, command tokens, local paths, or judge
-evidence references. Missing traces, evaluator failures, and cost-limit
-interruptions remain explicit partial results rather than being converted to
-zeroes. Treat exposed_and_outcome_improved as descriptive evidence only; it is
-not a causal claim.
+Results contain scenario IDs, opaque provenance fingerprints, evaluator
+outcomes, check results, trace/policy status, failure classes, retries, tool
+and terminal counts, tokens, wall time, cancellation, policy events, held-out
+aggregates, and per-task-family aggregates. They do not contain prompts,
+command tokens, local paths, or judge evidence references. Missing traces,
+evaluator failures, and cost-limit interruptions remain explicit partial
+results rather than being converted to zeroes. Treat
+exposed_and_outcome_improved as descriptive evidence only; it is not a causal
+claim.
 
 ## Inspect and remove cards and candidates
 

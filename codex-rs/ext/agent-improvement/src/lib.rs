@@ -31,8 +31,9 @@ pub use eval::{
     EvaluationManifest, EvaluationMemory, EvaluationMemoryProvenance, EvaluationMetrics,
     EvaluationRepository, EvaluationResult, EvaluationScenario, EvaluationScenarioResult,
     EvaluationSplit, EvaluationStatus, EvaluationTask, EvaluatorKind, EvaluatorResult,
-    EvaluatorSpec, EvaluatorStatus, JudgeLabel, MetricDelta, VerificationCheck, evaluate_manifest,
-    evaluate_manifest_at, load_evaluation_manifest, write_evaluation_result,
+    EvaluatorSpec, EvaluatorStatus, JudgeLabel, MetricDelta, PolicyStatus, PostRunEvidence,
+    TraceStatus, VerificationCheck, evaluate_manifest, evaluate_manifest_at,
+    load_evaluation_manifest, write_evaluation_result,
 };
 pub use evolve::{
     CardMaintenancePlan, EVOLUTION_HISTORY_FILE_NAME, EVOLUTION_HISTORY_SCHEMA_VERSION,

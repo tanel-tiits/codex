@@ -9,6 +9,7 @@ use codex_agent_improvement_extension::AGENT_IMPROVEMENT_WORKSPACE_PATH_ENV;
 use codex_agent_improvement_extension::AttributionEvidence;
 use codex_agent_improvement_extension::AttributionState;
 use codex_agent_improvement_extension::CandidateStatus;
+use codex_agent_improvement_extension::CheckResult;
 use codex_agent_improvement_extension::EVALUATION_MANIFEST_SCHEMA_VERSION;
 use codex_agent_improvement_extension::EXPERIENCE_CARD_SCHEMA_VERSION;
 use codex_agent_improvement_extension::EvaluationCondition;
@@ -16,6 +17,7 @@ use codex_agent_improvement_extension::EvaluationManifest;
 use codex_agent_improvement_extension::EvaluationMemory;
 use codex_agent_improvement_extension::EvaluationRepository;
 use codex_agent_improvement_extension::EvaluationScenario;
+use codex_agent_improvement_extension::EvaluatorKind;
 use codex_agent_improvement_extension::EvolutionConfig;
 use codex_agent_improvement_extension::EvolutionOutcome;
 use codex_agent_improvement_extension::ExperienceCandidate;
@@ -25,6 +27,8 @@ use codex_agent_improvement_extension::ImprovementCandidateStatus;
 use codex_agent_improvement_extension::ImprovementEvidenceCatalog;
 use codex_agent_improvement_extension::LiveEvaluationPlan;
 use codex_agent_improvement_extension::LiveEvaluationScenario;
+use codex_agent_improvement_extension::PostRunEvidence;
+use codex_agent_improvement_extension::VerificationCheck;
 use codex_agent_improvement_extension::accept_proposal;
 use codex_agent_improvement_extension::append_card;
 use codex_agent_improvement_extension::apply_card_maintenance;
@@ -3281,7 +3285,7 @@ fn run_debug_agent_improvement_evaluate_command(
         create_git_worktree(&source_checkout, &treatment_worktree, &source_commit)?;
         worktrees.push(treatment_worktree.clone());
 
-        let baseline_trace = run_live_condition(
+        let baseline_run = run_live_condition(
             &codex_bin,
             scenario,
             &baseline_worktree,
@@ -3292,7 +3296,7 @@ fn run_debug_agent_improvement_evaluate_command(
             cmd.model.as_deref(),
         )?;
         let exposure_before = total_card_exposure(&treatment_store)?;
-        let treatment_trace = run_live_condition(
+        let treatment_run = run_live_condition(
             &codex_bin,
             scenario,
             &treatment_worktree,
@@ -3323,7 +3327,7 @@ fn run_debug_agent_improvement_evaluate_command(
                 primary_checkout: Some(source_checkout.clone()),
             },
             baseline: live_condition(
-                baseline_trace,
+                baseline_run.trace_bundle,
                 baseline_worktree,
                 &source_commit,
                 &execution_fingerprint,
@@ -3332,9 +3336,10 @@ fn run_debug_agent_improvement_evaluate_command(
                 false,
                 &baseline_card_set_fingerprint,
                 None,
+                baseline_run.post_run,
             ),
             treatment: live_condition(
-                treatment_trace,
+                treatment_run.trace_bundle,
                 treatment_worktree,
                 &source_commit,
                 &execution_fingerprint,
@@ -3343,6 +3348,7 @@ fn run_debug_agent_improvement_evaluate_command(
                 true,
                 &treatment_card_set_fingerprint,
                 Some(treatment_store.clone()),
+                treatment_run.post_run,
             ),
             evaluator: scenario.evaluator.clone(),
             budget: scenario.budget.clone(),
@@ -3455,6 +3461,7 @@ fn live_condition(
     enabled: bool,
     card_set_fingerprint: &str,
     card_store_path: Option<PathBuf>,
+    post_run: Option<PostRunEvidence>,
 ) -> EvaluationCondition {
     EvaluationCondition {
         trace_bundle,
@@ -3470,7 +3477,13 @@ fn live_condition(
             card_store_path,
         },
         judge: None,
+        post_run,
     }
+}
+
+struct LiveConditionRun {
+    trace_bundle: PathBuf,
+    post_run: Option<PostRunEvidence>,
 }
 
 fn run_live_condition(
@@ -3482,7 +3495,7 @@ fn run_live_condition(
     source_workspace: &str,
     memory_enabled: bool,
     model: Option<&str>,
-) -> anyhow::Result<PathBuf> {
+) -> anyhow::Result<LiveConditionRun> {
     let prompt =
         scenario.task.prompt.as_deref().ok_or_else(|| {
             anyhow::anyhow!("live scenario {} has no prompt", scenario.scenario_id)
@@ -3523,7 +3536,76 @@ fn run_live_condition(
         .spawn()
         .with_context(|| format!("launch live evaluation for {}", scenario.scenario_id))?;
     let _ = wait_for_live_condition(status, scenario.budget.max_wall_time_ms)?;
-    find_trace_bundle(trace_root, &scenario.scenario_id)
+    let trace_bundle = find_trace_bundle(trace_root, &scenario.scenario_id)?;
+    let post_run = (scenario.evaluator.kind == EvaluatorKind::PostRunVerification)
+        .then(|| {
+            run_post_run_checks(
+                &scenario.evaluator.checks,
+                worktree,
+                scenario.budget.max_post_run_time_ms,
+            )
+        })
+        .transpose()?;
+    Ok(LiveConditionRun {
+        trace_bundle,
+        post_run,
+    })
+}
+
+/// Execute private evaluator commands only after the child exits. Commands
+/// are argv vectors, never shell strings, and run from the isolated worktree
+/// with a scrubbed environment. Their output is discarded; only check IDs and
+/// exit-code results enter the redacted evaluation result.
+fn run_post_run_checks(
+    checks: &[VerificationCheck],
+    worktree: &std::path::Path,
+    max_time_ms: u64,
+) -> anyhow::Result<PostRunEvidence> {
+    let deadline = Instant::now() + Duration::from_millis(max_time_ms);
+    let mut results = Vec::with_capacity(checks.len());
+    for check in checks {
+        results.push(CheckResult {
+            check_id: check.check_id.clone(),
+            success: run_post_run_check(check, worktree, deadline),
+        });
+    }
+    Ok(PostRunEvidence { checks: results })
+}
+
+fn run_post_run_check(
+    check: &VerificationCheck,
+    worktree: &std::path::Path,
+    deadline: Instant,
+) -> bool {
+    let Some((program, arguments)) = check.command_tokens.split_first() else {
+        return false;
+    };
+    let remaining = deadline.saturating_duration_since(Instant::now());
+    if remaining.is_zero() {
+        return false;
+    }
+
+    let mut command = ProcessCommand::new(program);
+    command
+        .args(arguments)
+        .current_dir(worktree)
+        .env_clear()
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null());
+    if let Some(path) = std::env::var_os("PATH") {
+        command.env("PATH", path);
+    }
+    let child = match command.spawn() {
+        Ok(child) => child,
+        Err(_) => return false,
+    };
+    let max_wait_ms = remaining.as_millis().try_into().unwrap_or(u64::MAX);
+    wait_for_live_condition(child, max_wait_ms)
+        .ok()
+        .flatten()
+        .and_then(|status| status.code())
+        == Some(check.expected_exit_code)
 }
 
 fn wait_for_live_condition(
@@ -3540,7 +3622,8 @@ fn wait_for_live_condition(
             let _ = child.wait();
             return Ok(None);
         }
-        thread::sleep(Duration::from_millis(50));
+        let remaining = deadline.saturating_duration_since(Instant::now());
+        thread::sleep(std::cmp::min(remaining, Duration::from_millis(50)));
     }
 }
 
@@ -7148,6 +7231,42 @@ enabled = true
         cli.feature_toggles
             .to_overrides()
             .expect_err("feature should be rejected")
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn post_run_checks_use_argv_and_respect_the_time_bound() {
+        let worktree = tempfile::tempdir().expect("temporary worktree");
+        let checks = vec![
+            VerificationCheck {
+                check_id: "argv".to_string(),
+                command_tokens: vec!["true".to_string(), ";".to_string(), "false".to_string()],
+                expected_exit_code: 0,
+            },
+            VerificationCheck {
+                check_id: "failure".to_string(),
+                command_tokens: vec!["false".to_string()],
+                expected_exit_code: 0,
+            },
+            VerificationCheck {
+                check_id: "timeout".to_string(),
+                command_tokens: vec!["sleep".to_string(), "1".to_string()],
+                expected_exit_code: 0,
+            },
+        ];
+
+        let evidence = run_post_run_checks(&checks, worktree.path(), 100)
+            .expect("post-run checks should produce bounded evidence");
+        assert_eq!(evidence.checks[0].check_id, "argv");
+        assert!(
+            evidence.checks[0].success,
+            "argv must not be interpreted by a shell"
+        );
+        assert!(!evidence.checks[1].success);
+        assert!(
+            !evidence.checks[2].success,
+            "long checks must be time bounded"
+        );
     }
 }
 

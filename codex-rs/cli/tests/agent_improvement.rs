@@ -32,6 +32,7 @@ use codex_agent_improvement_extension::LiveEvaluationPlan;
 use codex_agent_improvement_extension::LiveEvaluationScenario;
 use codex_agent_improvement_extension::MetricDelta;
 use codex_agent_improvement_extension::TaskFamily;
+use codex_agent_improvement_extension::VerificationCheck;
 use codex_agent_improvement_extension::append_candidate;
 use codex_agent_improvement_extension::append_card;
 use codex_rollout_trace::ExecutionStatus;
@@ -276,6 +277,7 @@ fn eval_command_writes_redacted_paired_results() -> Result<()> {
                 card_store_path,
             },
             judge: None,
+            post_run: None,
         }
     };
     let manifest = EvaluationManifest {
@@ -341,7 +343,7 @@ fn eval_command_writes_redacted_paired_results() -> Result<()> {
     let stdout: Value = serde_json::from_slice(&output.stdout)?;
     let file: Value = serde_json::from_slice(&std::fs::read(&result_path)?)?;
     assert_eq!(stdout, file);
-    assert_eq!(file["schema_version"], 1);
+    assert_eq!(file["schema_version"], EVALUATION_RESULT_SCHEMA_VERSION);
     assert_eq!(file["held_out"]["scenario_count"], 1);
     assert!(!serde_json::to_string(&file)?.contains("fixture/cli-task"));
     Ok(())
@@ -1103,8 +1105,12 @@ fn evolve_evaluate_dry_run_validates_a_private_held_out_plan() -> Result<()> {
                     fingerprint: format!("live-task-fingerprint-{index}"),
                 },
                 evaluator: EvaluatorSpec {
-                    kind: EvaluatorKind::TraceOutcome,
-                    checks: Vec::new(),
+                    kind: EvaluatorKind::PostRunVerification,
+                    checks: vec![VerificationCheck {
+                        check_id: "hidden-tests".to_string(),
+                        command_tokens: vec!["python3".to_string(), "private_tests.py".to_string()],
+                        expected_exit_code: 0,
+                    }],
                     require_all_checks: true,
                 },
                 budget: EvaluationBudget::default(),

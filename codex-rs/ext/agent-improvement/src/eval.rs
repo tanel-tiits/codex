@@ -38,7 +38,7 @@ use crate::summarize_rollout;
 /// Version of the local scenario manifest contract.
 pub const EVALUATION_MANIFEST_SCHEMA_VERSION: u32 = 1;
 /// Version of the aggregate result contract.
-pub const EVALUATION_RESULT_SCHEMA_VERSION: u32 = 1;
+pub const EVALUATION_RESULT_SCHEMA_VERSION: u32 = 2;
 
 const MAX_SCENARIOS: usize = 512;
 const MAX_CHECKS: usize = 16;
@@ -78,6 +78,8 @@ pub enum EvaluatorKind {
     TraceOutcome,
     /// Match declared command tokens and require their declared exit code.
     Verification,
+    /// Consume bounded checks executed by the evaluator after the agent run.
+    PostRunVerification,
     /// Consume a human label supplied in the private manifest.
     HumanJudge,
     /// Consume an explicitly recorded model-judge label; no model is called.
@@ -89,6 +91,7 @@ impl EvaluatorKind {
         match self {
             Self::TraceOutcome => "trace_outcome",
             Self::Verification => "verification",
+            Self::PostRunVerification => "post_run_verification",
             Self::HumanJudge => "human_judge",
             Self::ModelJudge => "model_judge",
         }
@@ -138,6 +141,9 @@ pub struct EvaluationCondition {
     pub memory: EvaluationMemory,
     #[serde(default)]
     pub judge: Option<JudgeLabel>,
+    /// Private evidence produced by evaluator-side post-run checks.
+    #[serde(default)]
+    pub post_run: Option<PostRunEvidence>,
 }
 
 /// Private label supplied by a human or an offline judge. It is never inferred
@@ -161,6 +167,14 @@ pub struct VerificationCheck {
     pub command_tokens: Vec<String>,
     #[serde(default)]
     pub expected_exit_code: i32,
+}
+
+/// Results from evaluator-side commands executed after a child run exits.
+/// Command tokens and command output remain private to the evaluation
+/// manifest and runner; only these bounded check results are published.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PostRunEvidence {
+    pub checks: Vec<CheckResult>,
 }
 
 /// Evaluator settings for one scenario.
@@ -191,6 +205,8 @@ pub struct EvaluationBudget {
     pub max_tool_calls: u32,
     #[serde(default = "default_max_terminal_operations")]
     pub max_terminal_operations: u32,
+    #[serde(default = "default_max_post_run_time_ms")]
+    pub max_post_run_time_ms: u64,
 }
 
 impl Default for EvaluationBudget {
@@ -201,6 +217,7 @@ impl Default for EvaluationBudget {
             max_wall_time_ms: default_max_wall_time_ms(),
             max_tool_calls: default_max_tool_calls(),
             max_terminal_operations: default_max_terminal_operations(),
+            max_post_run_time_ms: default_max_post_run_time_ms(),
         }
     }
 }
@@ -223,6 +240,10 @@ const fn default_max_tool_calls() -> u32 {
 
 const fn default_max_terminal_operations() -> u32 {
     DEFAULT_MAX_TERMINAL_OPERATIONS
+}
+
+const fn default_max_post_run_time_ms() -> u64 {
+    2 * 60 * 1000
 }
 
 /// Explicit evidence about whether the assisted condition exposed and used a
@@ -427,7 +448,10 @@ fn validate_condition(condition: &EvaluationCondition, label: &str) -> Result<()
 }
 
 pub(crate) fn validate_evaluator(evaluator: &EvaluatorSpec) -> Result<()> {
-    if evaluator.kind == EvaluatorKind::Verification {
+    if matches!(
+        evaluator.kind,
+        EvaluatorKind::Verification | EvaluatorKind::PostRunVerification
+    ) {
         ensure!(
             !evaluator.checks.is_empty(),
             "verification evaluator has no checks"
@@ -439,24 +463,24 @@ pub(crate) fn validate_evaluator(evaluator: &EvaluatorSpec) -> Result<()> {
     );
     let mut check_ids = BTreeSet::new();
     for check in &evaluator.checks {
-        ensure_id(&check.check_id, "verification.check_id")?;
+        ensure_id(&check.check_id, "evaluator.check_id")?;
         ensure!(
             check_ids.insert(check.check_id.clone()),
-            "duplicate verification check {}",
+            "duplicate evaluator check {}",
             check.check_id
         );
         ensure!(
             !check.command_tokens.is_empty(),
-            "verification check has no command tokens"
+            "evaluator check has no command tokens"
         );
         ensure!(
             check.command_tokens.len() <= 32,
-            "verification check contains too many command tokens"
+            "evaluator check contains too many command tokens"
         );
         for token in &check.command_tokens {
             ensure!(
                 !token.trim().is_empty() && token.chars().count() <= MAX_COMMAND_TOKEN_CHARS,
-                "verification command token is empty or too long"
+                "evaluator command token is empty or too long"
             );
         }
     }
@@ -477,6 +501,10 @@ pub(crate) fn validate_budget(budget: &EvaluationBudget) -> Result<()> {
     ensure!(
         budget.max_terminal_operations > 0,
         "max_terminal_operations must be positive"
+    );
+    ensure!(
+        budget.max_post_run_time_ms > 0,
+        "max_post_run_time_ms must be positive"
     );
     Ok(())
 }
@@ -617,17 +645,58 @@ fn evaluate_condition(
     let trace_size = match bundle_size(&condition.trace_bundle) {
         Ok(size) => size,
         Err(_) => {
-            return EvaluatedCondition::unavailable(EvaluationErrorCode::TraceUnavailable);
+            return EvaluatedCondition {
+                trace_id: None,
+                metrics: None,
+                status: EvaluationStatus::TraceUnavailable,
+                evaluator: evaluate_with_spec(
+                    None,
+                    None,
+                    &scenario.evaluator,
+                    condition.judge.as_ref(),
+                    condition.post_run.as_ref(),
+                ),
+                error_code: Some(EvaluationErrorCode::TraceUnavailable),
+            };
         }
     };
     if trace_size > scenario.budget.max_trace_bytes {
-        return EvaluatedCondition::cost_limited(EvaluationErrorCode::TraceTooLarge);
+        let evaluator = if scenario.evaluator.kind == EvaluatorKind::PostRunVerification {
+            evaluate_with_spec(
+                None,
+                None,
+                &scenario.evaluator,
+                condition.judge.as_ref(),
+                condition.post_run.as_ref(),
+            )
+        } else {
+            EvaluatorResult::unavailable()
+        };
+        return EvaluatedCondition {
+            trace_id: None,
+            metrics: None,
+            status: EvaluationStatus::CostLimited,
+            evaluator,
+            error_code: Some(EvaluationErrorCode::TraceTooLarge),
+        };
     }
 
     let trace = match replay_bundle(&condition.trace_bundle) {
         Ok(trace) => trace,
         Err(_) => {
-            return EvaluatedCondition::unavailable(EvaluationErrorCode::TraceReplayFailed);
+            return EvaluatedCondition {
+                trace_id: None,
+                metrics: None,
+                status: EvaluationStatus::TraceUnavailable,
+                evaluator: evaluate_with_spec(
+                    None,
+                    None,
+                    &scenario.evaluator,
+                    condition.judge.as_ref(),
+                    condition.post_run.as_ref(),
+                ),
+                error_code: Some(EvaluationErrorCode::TraceReplayFailed),
+            };
         }
     };
     let metrics = EvaluationMetrics::from_trace(&trace);
@@ -641,20 +710,32 @@ fn evaluate_condition(
         || metrics.tool_calls > scenario.budget.max_tool_calls
         || metrics.terminal_operations > scenario.budget.max_terminal_operations
     {
+        let evaluator = if scenario.evaluator.kind == EvaluatorKind::PostRunVerification {
+            evaluate_with_spec(
+                Some(&trace),
+                Some(&metrics),
+                &scenario.evaluator,
+                condition.judge.as_ref(),
+                condition.post_run.as_ref(),
+            )
+        } else {
+            EvaluatorResult::unavailable()
+        };
         return EvaluatedCondition::with_metrics(
             trace.trace_id,
             metrics,
             EvaluationStatus::CostLimited,
-            EvaluatorResult::unavailable(),
+            evaluator,
             Some(EvaluationErrorCode::CostLimitExceeded),
         );
     }
 
     let evaluator = evaluate_with_spec(
-        &trace,
-        &metrics,
+        Some(&trace),
+        Some(&metrics),
         &scenario.evaluator,
         condition.judge.as_ref(),
+        condition.post_run.as_ref(),
     );
     let (status, error_code) = match evaluator.status {
         EvaluatorStatus::Passed | EvaluatorStatus::Failed => (EvaluationStatus::Evaluated, None),
@@ -671,14 +752,18 @@ fn evaluate_condition(
 }
 
 fn evaluate_with_spec(
-    trace: &RolloutTrace,
-    metrics: &EvaluationMetrics,
+    trace: Option<&RolloutTrace>,
+    metrics: Option<&EvaluationMetrics>,
     evaluator: &EvaluatorSpec,
     judge: Option<&JudgeLabel>,
+    post_run: Option<&PostRunEvidence>,
 ) -> EvaluatorResult {
     match evaluator.kind {
         EvaluatorKind::TraceOutcome => {
-            let task_success = Some(metrics.failure_class == FailureClass::Completed);
+            let Some(metrics) = metrics else {
+                return EvaluatorResult::unavailable();
+            };
+            let task_success = Some(metrics.trace_status == TraceStatus::Completed);
             let verification_success = (metrics.verification_attempts > 0)
                 .then_some(metrics.failed_verification_attempts == 0);
             EvaluatorResult {
@@ -694,11 +779,49 @@ fn evaluate_with_spec(
             }
         }
         EvaluatorKind::Verification => {
+            let Some(trace) = trace else {
+                return EvaluatorResult::unavailable();
+            };
             let checks = evaluator
                 .checks
                 .iter()
                 .map(|check| evaluate_check(trace, check))
                 .collect::<Vec<_>>();
+            let task_success = if evaluator.require_all_checks {
+                checks.iter().all(|check| check.success)
+            } else {
+                checks.iter().any(|check| check.success)
+            };
+            EvaluatorResult {
+                status: if task_success {
+                    EvaluatorStatus::Passed
+                } else {
+                    EvaluatorStatus::Failed
+                },
+                task_success: Some(task_success),
+                verification_success: Some(task_success),
+                checks,
+                judge_score_bps: None,
+            }
+        }
+        EvaluatorKind::PostRunVerification => {
+            let Some(post_run) = post_run else {
+                return EvaluatorResult::unavailable();
+            };
+            let Some(checks) = evaluator
+                .checks
+                .iter()
+                .map(|expected| {
+                    post_run
+                        .checks
+                        .iter()
+                        .find(|observed| observed.check_id == expected.check_id)
+                        .cloned()
+                })
+                .collect::<Option<Vec<_>>>()
+            else {
+                return EvaluatorResult::error();
+            };
             let task_success = if evaluator.require_all_checks {
                 checks.iter().all(|check| check.success)
             } else {
@@ -782,26 +905,6 @@ struct EvaluatedCondition {
 }
 
 impl EvaluatedCondition {
-    fn unavailable(error_code: EvaluationErrorCode) -> Self {
-        Self {
-            trace_id: None,
-            metrics: None,
-            status: EvaluationStatus::TraceUnavailable,
-            evaluator: EvaluatorResult::unavailable(),
-            error_code: Some(error_code),
-        }
-    }
-
-    fn cost_limited(error_code: EvaluationErrorCode) -> Self {
-        Self {
-            trace_id: None,
-            metrics: None,
-            status: EvaluationStatus::CostLimited,
-            evaluator: EvaluatorResult::unavailable(),
-            error_code: Some(error_code),
-        }
-    }
-
     fn with_metrics(
         trace_id: String,
         metrics: EvaluationMetrics,
@@ -845,6 +948,8 @@ pub enum EvaluationErrorCode {
 /// Bounded runtime metrics derived from a reduced rollout.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct EvaluationMetrics {
+    pub trace_status: TraceStatus,
+    pub policy_status: PolicyStatus,
     pub failure_class: FailureClass,
     pub failure_signature: FailureSignature,
     pub tool_calls: u32,
@@ -876,7 +981,19 @@ impl EvaluationMetrics {
                 .checked_sub(trace.started_at_unix_ms)
                 .and_then(|value| u64::try_from(value).ok())
         });
+        let policy_event_count = policy_event_count(trace);
         Self {
+            trace_status: match trace.status {
+                RolloutStatus::Completed => TraceStatus::Completed,
+                RolloutStatus::Failed => TraceStatus::Failed,
+                RolloutStatus::Aborted => TraceStatus::Aborted,
+                RolloutStatus::Running => TraceStatus::Running,
+            },
+            policy_status: if policy_event_count > 0 {
+                PolicyStatus::BoundaryObserved
+            } else {
+                PolicyStatus::Clean
+            },
             failure_class: card.failure_class,
             failure_signature: card.failure_signature,
             tool_calls: bounded_u32(trace.tool_calls.len()),
@@ -890,7 +1007,7 @@ impl EvaluationMetrics {
             wall_time_ms,
             cancelled: card.failure_class == FailureClass::Cancelled
                 || trace.status == RolloutStatus::Aborted,
-            policy_event_count: policy_event_count(trace),
+            policy_event_count,
             user_correction_count: root_user_correction_count(trace),
         }
     }
@@ -924,6 +1041,16 @@ impl EvaluatorResult {
             judge_score_bps: None,
         }
     }
+
+    fn error() -> Self {
+        Self {
+            status: EvaluatorStatus::Error,
+            task_success: None,
+            verification_success: None,
+            checks: Vec::new(),
+            judge_score_bps: None,
+        }
+    }
 }
 
 /// Evaluator status independent from trace availability.
@@ -934,6 +1061,26 @@ pub enum EvaluatorStatus {
     Failed,
     Unavailable,
     Error,
+}
+
+/// Completion state of the recorded child rollout. This is independent from
+/// the coding/task evaluator result.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum TraceStatus {
+    Completed,
+    Failed,
+    Aborted,
+    Running,
+}
+
+/// Whether the trace observed a permission or sandbox boundary event. A
+/// boundary is diagnostic metadata and does not by itself make the task fail.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum PolicyStatus {
+    Clean,
+    BoundaryObserved,
 }
 
 /// Provenance retained in a result without local paths or raw card IDs.

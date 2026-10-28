@@ -17,6 +17,7 @@ use tempfile::TempDir;
 
 use super::AttributionAssessment;
 use super::AttributionEvidence;
+use super::CheckResult;
 use super::EvaluationBudget;
 use super::EvaluationCondition;
 use super::EvaluationErrorCode;
@@ -29,6 +30,9 @@ use super::EvaluationStatus;
 use super::EvaluationTask;
 use super::EvaluatorKind;
 use super::EvaluatorSpec;
+use super::PolicyStatus;
+use super::PostRunEvidence;
+use super::TraceStatus;
 use super::VerificationCheck;
 use super::evaluate_manifest_at;
 use super::write_evaluation_result;
@@ -83,6 +87,7 @@ fn manifest_for(
                     card_store_path: None,
                 },
                 judge: None,
+                post_run: None,
             },
             treatment: EvaluationCondition {
                 trace_bundle: treatment_trace,
@@ -98,6 +103,7 @@ fn manifest_for(
                     card_store_path: Some(card_store),
                 },
                 judge: None,
+                post_run: None,
             },
             evaluator,
             budget: EvaluationBudget::default(),
@@ -191,6 +197,7 @@ fn trace_bundle(root: &Path, name: &str, status: RolloutStatus, command: Option<
             )
             .expect("runtime start");
         let succeeded = status == RolloutStatus::Completed;
+        let policy_boundary = command.to_ascii_lowercase().contains("sandbox");
         let runtime_end = writer
             .write_json_payload(
                 RawPayloadKind::ToolRuntimeEvent,
@@ -200,7 +207,13 @@ fn trace_bundle(root: &Path, name: &str, status: RolloutStatus, command: Option<
                     "turn_id": "turn-1",
                     "command": command.split_whitespace().collect::<Vec<_>>(),
                     "cwd": "/fixture",
-                    "aggregated_output": if succeeded { "ok\n" } else { "failed\n" },
+                    "aggregated_output": if policy_boundary {
+                        "sandbox: operation not permitted\n"
+                    } else if succeeded {
+                        "ok\n"
+                    } else {
+                        "failed\n"
+                    },
                     "exit_code": if succeeded { 0 } else { 1 },
                     "status": if succeeded { "completed" } else { "failed" }
                 }),
@@ -230,7 +243,13 @@ fn trace_bundle(root: &Path, name: &str, status: RolloutStatus, command: Option<
                     "type": "direct_response",
                     "response_item": {
                         "type": "function_call_output",
-                        "output": if succeeded { "ok\n" } else { "failed\n" }
+                        "output": if policy_boundary {
+                            "sandbox: operation not permitted\n"
+                        } else if succeeded {
+                            "ok\n"
+                        } else {
+                            "failed\n"
+                        }
                     }
                 }),
             )
@@ -281,6 +300,18 @@ fn trace_outcome_evaluator() -> EvaluatorSpec {
     EvaluatorSpec {
         kind: EvaluatorKind::TraceOutcome,
         checks: Vec::new(),
+        require_all_checks: true,
+    }
+}
+
+fn post_run_evaluator() -> EvaluatorSpec {
+    EvaluatorSpec {
+        kind: EvaluatorKind::PostRunVerification,
+        checks: vec![VerificationCheck {
+            check_id: "hidden-tests".to_string(),
+            command_tokens: vec!["python3".to_string(), "hidden_tests.py".to_string()],
+            expected_exit_code: 0,
+        }],
         require_all_checks: true,
     }
 }
@@ -342,6 +373,35 @@ fn paired_eval_reports_held_out_outcomes_and_keeps_private_inputs_out() -> Resul
 }
 
 #[test]
+fn trace_completion_and_policy_status_are_reported_separately() -> Result<()> {
+    let temp = TempDir::new()?;
+    let traces = temp.path().join("traces");
+    fs::create_dir_all(&traces)?;
+    let baseline = trace_bundle(
+        &traces,
+        "baseline",
+        RolloutStatus::Completed,
+        Some("sandbox-check"),
+    );
+    let treatment = trace_bundle(&traces, "treatment", RolloutStatus::Completed, None);
+    let manifest = manifest_for(
+        &temp.path().join("scenario"),
+        baseline,
+        treatment,
+        trace_outcome_evaluator(),
+    );
+
+    let result = evaluate_manifest_at(&manifest, 123)?;
+    let baseline = &result.scenarios[0].baseline;
+    let metrics = baseline.metrics.as_ref().expect("baseline metrics");
+    assert_eq!(metrics.trace_status, TraceStatus::Completed);
+    assert_eq!(metrics.policy_status, PolicyStatus::BoundaryObserved);
+    assert_eq!(metrics.failure_class, crate::FailureClass::PolicyBlocked);
+    assert_eq!(baseline.evaluator.task_success, Some(true));
+    Ok(())
+}
+
+#[test]
 fn verification_evaluator_reports_failed_checks_and_cost_limits() -> Result<()> {
     let temp = TempDir::new()?;
     let traces = temp.path().join("traces");
@@ -379,6 +439,129 @@ fn verification_evaluator_reports_failed_checks_and_cost_limits() -> Result<()> 
     assert_eq!(
         limited.scenarios[0].treatment.status,
         EvaluationStatus::CostLimited
+    );
+    Ok(())
+}
+
+#[test]
+fn post_run_evaluator_uses_private_evidence_and_separates_trace_status() -> Result<()> {
+    let temp = TempDir::new()?;
+    let traces = temp.path().join("traces");
+    fs::create_dir_all(&traces)?;
+    let baseline = trace_bundle(&traces, "baseline", RolloutStatus::Completed, None);
+    let treatment = trace_bundle(&traces, "treatment", RolloutStatus::Completed, None);
+    let mut manifest = manifest_for(
+        &temp.path().join("scenario"),
+        baseline,
+        treatment,
+        post_run_evaluator(),
+    );
+    let evidence = Some(PostRunEvidence {
+        checks: vec![CheckResult {
+            check_id: "hidden-tests".to_string(),
+            success: true,
+        }],
+    });
+    manifest.scenarios[0].baseline.post_run = evidence.clone();
+    manifest.scenarios[0].treatment.post_run = evidence;
+
+    let result = evaluate_manifest_at(&manifest, 123)?;
+    let scenario = &result.scenarios[0];
+    assert_eq!(scenario.baseline.evaluator.task_success, Some(true));
+    assert_eq!(
+        scenario.treatment.evaluator.verification_success,
+        Some(true)
+    );
+    assert_eq!(
+        scenario.treatment.evaluator.checks[0],
+        CheckResult {
+            check_id: "hidden-tests".to_string(),
+            success: true,
+        }
+    );
+    let metrics = scenario.treatment.metrics.as_ref().expect("metrics");
+    assert_eq!(metrics.trace_status, TraceStatus::Completed);
+    assert_eq!(metrics.policy_status, PolicyStatus::Clean);
+
+    let json = serde_json::to_string(&result)?;
+    assert!(!json.contains("python3"));
+    assert!(!json.contains("hidden_tests.py"));
+    Ok(())
+}
+
+#[test]
+fn post_run_failure_and_missing_evidence_are_distinct() -> Result<()> {
+    let temp = TempDir::new()?;
+    let traces = temp.path().join("traces");
+    fs::create_dir_all(&traces)?;
+    let baseline = trace_bundle(&traces, "baseline", RolloutStatus::Completed, None);
+    let treatment = trace_bundle(&traces, "treatment", RolloutStatus::Completed, None);
+    let mut manifest = manifest_for(
+        &temp.path().join("scenario"),
+        baseline,
+        treatment,
+        post_run_evaluator(),
+    );
+    manifest.scenarios[0].baseline.post_run = Some(PostRunEvidence {
+        checks: vec![CheckResult {
+            check_id: "hidden-tests".to_string(),
+            success: false,
+        }],
+    });
+    let result = evaluate_manifest_at(&manifest, 123)?;
+    assert_eq!(
+        result.scenarios[0].baseline.evaluator.status,
+        super::EvaluatorStatus::Failed
+    );
+    assert_eq!(
+        result.scenarios[0].baseline.evaluator.task_success,
+        Some(false)
+    );
+    assert_eq!(
+        result.scenarios[0].treatment.status,
+        EvaluationStatus::EvaluatorUnavailable
+    );
+    assert_eq!(
+        result.scenarios[0].treatment.error_code,
+        Some(EvaluationErrorCode::MissingEvaluatorEvidence)
+    );
+    Ok(())
+}
+
+#[test]
+fn post_run_result_remains_available_when_trace_is_cost_limited() -> Result<()> {
+    let temp = TempDir::new()?;
+    let traces = temp.path().join("traces");
+    fs::create_dir_all(&traces)?;
+    let baseline = trace_bundle(&traces, "baseline", RolloutStatus::Completed, None);
+    let treatment = trace_bundle(&traces, "treatment", RolloutStatus::Completed, None);
+    let mut manifest = manifest_for(
+        &temp.path().join("scenario"),
+        baseline,
+        treatment,
+        post_run_evaluator(),
+    );
+    manifest.scenarios[0].baseline.post_run = Some(PostRunEvidence {
+        checks: vec![CheckResult {
+            check_id: "hidden-tests".to_string(),
+            success: true,
+        }],
+    });
+    manifest.scenarios[0].treatment.post_run = manifest.scenarios[0].baseline.post_run.clone();
+    manifest.scenarios[0].budget.max_trace_bytes = 1;
+
+    let result = evaluate_manifest_at(&manifest, 123)?;
+    assert_eq!(
+        result.scenarios[0].baseline.status,
+        EvaluationStatus::CostLimited
+    );
+    assert_eq!(
+        result.scenarios[0].baseline.evaluator.task_success,
+        Some(true)
+    );
+    assert_eq!(
+        result.scenarios[0].treatment.evaluator.task_success,
+        Some(true)
     );
     Ok(())
 }
