@@ -26,7 +26,8 @@ use crate::CandidateTrigger;
 use crate::ExperienceRetrievalContext;
 use crate::capture::CandidateCaptureOutcome;
 use crate::capture::capture_candidate_from_bundle;
-use crate::load_cards;
+use crate::current_unix_ms;
+use crate::load_runtime_cards;
 use crate::record_card_exposure;
 use crate::render_cards;
 use crate::select_relevant_with_context;
@@ -79,7 +80,7 @@ impl AgentImprovementExtension {
             return Vec::new();
         }
 
-        let cards = match load_cards(&config.root) {
+        let cards = match load_runtime_cards(&config.root, current_unix_ms()) {
             Ok(cards) => cards,
             Err(error) => {
                 tracing::warn!(

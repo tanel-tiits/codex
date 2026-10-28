@@ -5,18 +5,29 @@ use codex_agent_improvement_extension::AgentImprovementEvidence;
 use codex_agent_improvement_extension::AttributionEvidence;
 use codex_agent_improvement_extension::CandidateTrigger;
 use codex_agent_improvement_extension::EVALUATION_MANIFEST_SCHEMA_VERSION;
+use codex_agent_improvement_extension::EVALUATION_RESULT_SCHEMA_VERSION;
+use codex_agent_improvement_extension::EvaluationAggregate;
 use codex_agent_improvement_extension::EvaluationCondition;
+use codex_agent_improvement_extension::EvaluationConditionProvenance;
+use codex_agent_improvement_extension::EvaluationConditionResult;
 use codex_agent_improvement_extension::EvaluationManifest;
 use codex_agent_improvement_extension::EvaluationMemory;
+use codex_agent_improvement_extension::EvaluationMemoryProvenance;
 use codex_agent_improvement_extension::EvaluationRepository;
+use codex_agent_improvement_extension::EvaluationResult;
 use codex_agent_improvement_extension::EvaluationScenario;
+use codex_agent_improvement_extension::EvaluationScenarioResult;
 use codex_agent_improvement_extension::EvaluationSplit;
+use codex_agent_improvement_extension::EvaluationStatus;
 use codex_agent_improvement_extension::EvaluationTask;
 use codex_agent_improvement_extension::EvaluatorKind;
+use codex_agent_improvement_extension::EvaluatorResult;
 use codex_agent_improvement_extension::EvaluatorSpec;
+use codex_agent_improvement_extension::EvaluatorStatus;
 use codex_agent_improvement_extension::ExperienceCandidate;
 use codex_agent_improvement_extension::ExperienceCard;
 use codex_agent_improvement_extension::FailureClass;
+use codex_agent_improvement_extension::MetricDelta;
 use codex_agent_improvement_extension::TaskFamily;
 use codex_agent_improvement_extension::append_candidate;
 use codex_agent_improvement_extension::append_card;
@@ -25,6 +36,8 @@ use codex_rollout_trace::RawTraceEventPayload;
 use codex_rollout_trace::RolloutStatus;
 use codex_rollout_trace::TraceWriter;
 use serde_json::Value;
+use std::collections::BTreeMap;
+use std::time::{SystemTime, UNIX_EPOCH};
 use tempfile::TempDir;
 
 fn codex_command(codex_home: &Path) -> Result<assert_cmd::Command> {
@@ -66,6 +79,82 @@ fn minimal_completed_bundle(root: &Path) -> Result<std::path::PathBuf> {
         status: RolloutStatus::Completed,
     })?;
     Ok(bundle)
+}
+
+fn current_unix_ms() -> i64 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .expect("system clock after epoch")
+        .as_millis() as i64
+}
+
+fn promotion_result(evaluated_at_unix_ms: i64) -> EvaluationResult {
+    let condition = |enabled: bool, task_success: bool, trace_id: &str| EvaluationConditionResult {
+        provenance: EvaluationConditionProvenance {
+            execution_config_fingerprint: "cli-execution-v1".to_string(),
+            policy_fingerprint: "cli-policy-v1".to_string(),
+            worktree_fingerprint: "cli-worktree-v1".to_string(),
+            memory: EvaluationMemoryProvenance {
+                enabled,
+                card_set_fingerprint: if enabled {
+                    "cli-cards-treatment".to_string()
+                } else {
+                    "cli-cards-none".to_string()
+                },
+                retrieval_policy_fingerprint: "cli-retrieval-v1".to_string(),
+                card_schema_version: 2,
+            },
+        },
+        trace_id: Some(trace_id.to_string()),
+        status: EvaluationStatus::Evaluated,
+        error_code: None,
+        metrics: None,
+        evaluator: EvaluatorResult {
+            status: if task_success {
+                EvaluatorStatus::Passed
+            } else {
+                EvaluatorStatus::Failed
+            },
+            task_success: Some(task_success),
+            verification_success: Some(task_success),
+            checks: Vec::new(),
+            judge_score_bps: None,
+        },
+    };
+    EvaluationResult {
+        schema_version: EVALUATION_RESULT_SCHEMA_VERSION,
+        manifest_id: "cli-promotion-manifest".to_string(),
+        evaluated_at_unix_ms,
+        scenario_count: 1,
+        all: EvaluationAggregate::default(),
+        held_out: EvaluationAggregate::default(),
+        by_task_family: BTreeMap::new(),
+        scenarios: vec![EvaluationScenarioResult {
+            scenario_id: "cli-promotion-scenario".to_string(),
+            task_family: TaskFamily::Coding,
+            split: EvaluationSplit::HeldOut,
+            task_fingerprint: "cli-task-v1".to_string(),
+            repository_snapshot_fingerprint: "cli-repo-v1".to_string(),
+            evaluator: EvaluatorKind::HumanJudge,
+            baseline: condition(false, false, "cli-baseline-trace"),
+            treatment: condition(true, true, "cli-treatment-trace"),
+            delta: MetricDelta {
+                task_success: Some(1),
+                verification_success: Some(1),
+                input_tokens: None,
+                output_tokens: None,
+                reasoning_output_tokens: None,
+                wall_time_ms: None,
+                tool_calls: None,
+                terminal_operations: None,
+                retry_count: None,
+                repeated_failure_count: None,
+                policy_event_count: None,
+            },
+            attribution:
+                codex_agent_improvement_extension::AttributionAssessment::ExposedAndOutcomeImproved,
+        }],
+    }
 }
 
 #[test]
@@ -531,6 +620,191 @@ fn proposal_drafting_is_read_only_and_evidence_validation_is_explicit() -> Resul
     assert!(!output.status.success());
     assert!(String::from_utf8_lossy(&output.stderr).contains("missing improvement evidence"));
     assert!(!store.join("cards.jsonl").exists());
+
+    Ok(())
+}
+
+#[test]
+fn proposal_promotion_cli_is_manual_scoped_and_reversible() -> Result<()> {
+    let home = TempDir::new()?;
+    let store = home.path().join("agent-improvement");
+    let created_at = current_unix_ms();
+    let card = ExperienceCard::new(
+        "trace-promotion-cli",
+        created_at,
+        TaskFamily::Coding,
+        FailureClass::CommandFailure,
+        AgentImprovementEvidence::default(),
+        vec!["command_failed".to_string()],
+        "Reproduce the first failing parser command.",
+        vec!["reproduce_first_failing_command".to_string()],
+    );
+    let candidate =
+        ExperienceCandidate::from_card(card, created_at, CandidateTrigger::ThreadStop, None);
+    append_candidate(&store, &candidate, 8)?;
+    let proposal_path = home.path().join("promotion-proposal.json");
+    let evaluation_path = home.path().join("promotion-results.json");
+    std::fs::write(
+        &evaluation_path,
+        serde_json::to_vec_pretty(&promotion_result(created_at + 1))?,
+    )?;
+
+    let mut draft = codex_command(home.path())?;
+    let output = draft
+        .args([
+            "debug",
+            "agent-improvement",
+            "proposals",
+            "draft-card",
+            "--store",
+            store.to_str().expect("UTF-8 store path"),
+            &candidate.candidate_id,
+            "--evaluation-scenario",
+            "cli-promotion-scenario",
+            "--output",
+            proposal_path.to_str().expect("UTF-8 proposal path"),
+        ])
+        .output()?;
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+
+    let mut validate = codex_command(home.path())?;
+    let output = validate
+        .args([
+            "debug",
+            "agent-improvement",
+            "proposals",
+            "validate",
+            proposal_path.to_str().expect("UTF-8 proposal path"),
+            "--state-store",
+            store.to_str().expect("UTF-8 store path"),
+            "--candidate-store",
+            store.to_str().expect("UTF-8 store path"),
+            "--evaluation-results",
+            evaluation_path.to_str().expect("UTF-8 evaluation path"),
+            "--actor",
+            "reviewer",
+        ])
+        .output()?;
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert_eq!(
+        serde_json::from_slice::<Value>(&output.stdout)?["state"],
+        "validated"
+    );
+
+    let mut evaluate = codex_command(home.path())?;
+    let output = evaluate
+        .args([
+            "debug",
+            "agent-improvement",
+            "proposals",
+            "evaluate",
+            proposal_path.to_str().expect("UTF-8 proposal path"),
+            "--store",
+            store.to_str().expect("UTF-8 store path"),
+            "--candidate-store",
+            store.to_str().expect("UTF-8 store path"),
+            "--evaluation-results",
+            evaluation_path.to_str().expect("UTF-8 evaluation path"),
+            "--actor",
+            "evaluator",
+        ])
+        .output()?;
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert_eq!(
+        serde_json::from_slice::<Value>(&output.stdout)?["state"],
+        "evaluated"
+    );
+
+    for (operation, actor) in [("accept", "reviewer"), ("promote", "reviewer")] {
+        let mut command = codex_command(home.path())?;
+        let output = command
+            .args([
+                "debug",
+                "agent-improvement",
+                "proposals",
+                operation,
+                proposal_path.to_str().expect("UTF-8 proposal path"),
+                "--store",
+                store.to_str().expect("UTF-8 store path"),
+                "--actor",
+                actor,
+            ])
+            .output()?;
+        assert!(
+            output.status.success(),
+            "{}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+    }
+    assert!(store.join("cards.jsonl").exists());
+
+    let mut status = codex_command(home.path())?;
+    let output = status
+        .args([
+            "debug",
+            "agent-improvement",
+            "proposals",
+            "status",
+            proposal_path.to_str().expect("UTF-8 proposal path"),
+            "--store",
+            store.to_str().expect("UTF-8 store path"),
+        ])
+        .output()?;
+    assert!(output.status.success());
+    let active_status: Value = serde_json::from_slice(&output.stdout)?;
+    assert_eq!(active_status["state"], "active");
+    assert!(active_status["evaluation"].is_object());
+
+    let mut render = codex_command(home.path())?;
+    let output = render
+        .args([
+            "debug",
+            "agent-improvement",
+            "render",
+            "--store",
+            store.to_str().expect("UTF-8 store path"),
+            "--query",
+            "fix the parser",
+        ])
+        .output()?;
+    assert!(output.status.success());
+    assert!(String::from_utf8(output.stdout)?.contains("first failing parser command"));
+
+    let mut rollback = codex_command(home.path())?;
+    let output = rollback
+        .args([
+            "debug",
+            "agent-improvement",
+            "proposals",
+            "rollback",
+            proposal_path.to_str().expect("UTF-8 proposal path"),
+            "--store",
+            store.to_str().expect("UTF-8 store path"),
+            "--actor",
+            "reviewer",
+        ])
+        .output()?;
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert_eq!(
+        serde_json::from_slice::<Value>(&output.stdout)?["state"],
+        "retired"
+    );
 
     Ok(())
 }

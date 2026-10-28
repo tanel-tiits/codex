@@ -171,8 +171,86 @@ markers, dangerous commands, scope contradictions, permission/sandbox changes,
 and patches outside a relative \`AGENTS.md\` path. Validation records what must
 be checked; it does not run commands. A proposal remains separate from
 \`candidates.jsonl\` and \`cards.jsonl\`, so explicit card acceptance is still
-the only Milestone 1–3 activation boundary. Promotion of non-card artifacts is
-not implemented until Milestone 6.
+the only Milestone 1–3 activation boundary. Milestone 6 adds a separate
+promotion path for proposals; non-card artifacts still require normal diff
+review and are never applied by this subsystem.
+
+## Promote, inspect, and roll back a proposal
+
+Milestone 6 adds a manual, append-only promotion control plane. Use a real
+candidate store and a redacted held-out evaluation result:
+
+\`\`\`bash
+codex debug agent-improvement proposals validate \\
+  /tmp/improvement-proposal.json \\
+  --state-store "$CODEX_HOME/agent-improvement" \\
+  --candidate-store "$CODEX_HOME/agent-improvement" \\
+  --evaluation-results /path/to/evaluation-results.json \\
+  --actor reviewer
+
+codex debug agent-improvement proposals evaluate \\
+  /tmp/improvement-proposal.json \\
+  --store "$CODEX_HOME/agent-improvement" \\
+  --candidate-store "$CODEX_HOME/agent-improvement" \\
+  --evaluation-results /path/to/evaluation-results.json \\
+  --actor evaluator
+
+codex debug agent-improvement proposals accept \\
+  /tmp/improvement-proposal.json \\
+  --store "$CODEX_HOME/agent-improvement" \\
+  --actor reviewer
+
+codex debug agent-improvement proposals promote \\
+  /tmp/improvement-proposal.json \\
+  --store "$CODEX_HOME/agent-improvement" \\
+  --actor reviewer
+\`\`\`
+
+Promotion requires the sequence `validated → evaluated → accepted`, a held-out
+baseline/treatment pair with matching execution and policy fingerprints, no
+task-success or verification regression, a non-expired proposal, and an
+enabled policy scope. Only the experience-card lane can become retrieval
+context. Skill, `AGENTS.md`, prompt/configuration, and diagnostic proposals
+remain normal review artifacts; this subsystem cannot change approvals,
+permissions, sandboxing, or instruction precedence.
+
+Inspect the state and provenance at any time:
+
+\`\`\`bash
+codex debug agent-improvement proposals status \\
+  /tmp/improvement-proposal.json \\
+  --store "$CODEX_HOME/agent-improvement"
+\`\`\`
+
+The status includes the candidate fingerprint, scope, evidence IDs, evaluator
+summary, human actor, expiry, and previous version. Events are stored in
+`promotion-events.jsonl` and the active view is rebuilt from that log. A
+one-command rollback retires the active card and restores the previous active
+card when one was recorded:
+
+\`\`\`bash
+codex debug agent-improvement proposals rollback \\
+  /tmp/improvement-proposal.json \\
+  --store "$CODEX_HOME/agent-improvement" \\
+  --actor reviewer
+\`\`\`
+
+An optional `promotion-policy.json` can disable promotion/retrieval, set a
+TTL, cap active improvements, or allowlist repository/task-family scopes. If
+the file is absent, bounded manual defaults are used; if an existing policy or
+event log is malformed, the runtime fails closed. A global emergency policy
+can be written as:
+
+\`\`\`json
+{
+  "schema_version": 1,
+  "enabled": false,
+  "kill_switch": true,
+  "default_ttl_days": 30,
+  "default_max_active": 32,
+  "scopes": []
+}
+\`\`\`
 
 ## Review card adoption
 

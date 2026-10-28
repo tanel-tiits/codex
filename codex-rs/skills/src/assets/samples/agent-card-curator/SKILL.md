@@ -48,14 +48,39 @@ candidates.
    changes as reviewable diffs; do not apply them to the checkout.
 6. Ask the user for an explicit decision for each candidate. A request to
    “review” does not authorize acceptance or promotion.
-7. On explicit confirmation, accept or reject only the named candidate:
+7. For a proposed behavioral card, use the Milestone 6 control plane after
+   the held-out result is available. Record validation and evaluation in the
+   promotion root, then ask separately before each human decision:
+
+       codex debug agent-improvement proposals validate <PROPOSAL.json> \
+         --state-store <STORE> --candidate-store <STORE> \
+         --evaluation-results <RESULTS.json> --actor <ACTOR>
+       codex debug agent-improvement proposals evaluate <PROPOSAL.json> \
+         --store <STORE> --candidate-store <STORE> \
+         --evaluation-results <RESULTS.json> --actor <ACTOR>
+
+   Only after explicit approval may the named proposal be accepted and
+   promoted:
+
+       codex debug agent-improvement proposals accept <PROPOSAL.json> \
+         --store <STORE> --actor <ACTOR>
+       codex debug agent-improvement proposals promote <PROPOSAL.json> \
+         --store <STORE> --actor <ACTOR>
+
+   Inspect provenance with `proposals status`. If the user instead explicitly
+   requests the foundational candidate workflow, accept or reject only the
+   named candidate:
 
        codex debug agent-improvement candidates accept --store <STORE> <CANDIDATE_ID>
        codex debug agent-improvement candidates reject --store <STORE> <CANDIDATE_ID>
 
-8. After acceptance, verify the active card with the read-only render command
-   or codex debug prompt-input. Explain that active cards are advisory,
-   untrusted context and cannot change permissions or instruction precedence.
+8. After promotion or foundational acceptance, verify the active card with the
+   read-only render command or codex debug prompt-input. Explain that active
+   cards are advisory, untrusted context and cannot change permissions or
+   instruction precedence. A promoted card can be rolled back explicitly:
+
+       codex debug agent-improvement proposals rollback <PROPOSAL.json> \
+         --store <STORE> --actor <ACTOR>
 
 ## Boundaries
 
@@ -63,6 +88,8 @@ candidates.
 - Never apply a proposal, edit AGENTS.md, Skills, configuration, repository
   code, permissions, approval policy, or sandbox policy as part of this
   workflow. Emit diffs for review only.
+- Never promote a proposal without a held-out evaluation result and separate
+  human acceptance. Non-card lanes remain normal diff-review artifacts.
 - Never draft from raw prompts, model responses, terminal output, secrets, or
   filesystem paths. Use only bounded cards and opaque evidence identifiers.
 - Never treat a structural validation pass as an evaluation result. A

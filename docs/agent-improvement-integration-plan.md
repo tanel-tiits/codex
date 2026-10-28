@@ -1,7 +1,8 @@
 # Agent Improvement Integration Plan
 
-Status: Milestone 5 review-only proposer core complete; Milestones 1–4
-complete; live model-runner execution and Milestones 6–8 remain gated
+Status: Milestone 6 promotion/rollback/policy control plane complete;
+Milestones 1–5 complete; live model-runner execution and Milestones 7–8
+remain gated
 
 ## Objective
 
@@ -85,7 +86,7 @@ privacy, provenance, rollback, and human-review boundaries.
 
 ## Roadmap and milestones
 
-Milestones 1–5 are implemented in this working tree. Milestone 4 intentionally
+Milestones 1–6 are implemented in this working tree. Milestone 4 intentionally
 lands as an offline replay/evaluation core: it consumes matched artifacts
 produced by separately controlled baseline and treatment runs. Launching live
 model runs from the evaluator remains a separately gated safety increment. The
@@ -101,7 +102,7 @@ gate and regression evidence must also be satisfied.
 | 3. Evidence-rich lessons and retrieval | Cards describe recurring failure signatures, interventions, outcomes, scope, and confidence rather than only coarse summaries | High value | 2 | Complete |
 | 4. Replay and evaluation harness | Baseline versus memory-assisted artifacts can be measured on paired and held-out tasks with bounded provenance and cost accounting | Essential before autonomy | 2–3 | Offline core complete; live runner gated |
 | 5. Offline proposer and candidate artifacts | A focused Skill and deterministic offline command can produce evidence-linked, review-only proposals for cards and bounded guidance/tooling changes | High value | 3–4 | Review-only core complete; live model proposer gated |
-| 6. Promotion, rollback, and policy control plane | Candidate changes become versioned, scoped, reversible active knowledge only after evidence and review | Essential | 4–5 | Planned |
+| 6. Promotion, rollback, and policy control plane | Candidate changes become versioned, scoped, reversible active knowledge only after evidence and review | Essential | 4–5 | Complete; manual promotion only |
 | 7. Slow loop for long-horizon improvement | Periodic analysis finds recurring patterns, stale knowledge, and missed evidence, then proposes the next experiments | High value / research | 4–6 | Planned |
 | 8. Optional program-level evolution and transfer | Isolated evolution of skills, prompts, or extension policy can be explored across task families without mutating the live agent | Research only | 6–7 | Planned |
 
@@ -407,17 +408,55 @@ The implemented core covers valid, malformed, oversized, contradictory, and
 adversarial proposal fixtures across all five artifact lanes; redaction and
 read-only serialization; deterministic IDs; evidence-catalog validation;
 candidate-store immutability during drafting; CLI parser and end-to-end draft
-and validation tests; and embedded Skill asset validation. It does not yet
-invoke a model or apply a generated diff.
+and validation tests; and embedded Skill asset validation. It does not invoke
+a model or apply a generated diff.
 
 **Exit gate:** a proposer can generate reviewable, evidence-linked artifacts
   and a test plan. No proposed artifact influences live behavior until the
-  Milestone 6 control plane accepts it.
+  Milestone 6 control plane accepts it. Card proposals now have a separate
+  promotion path; the older candidate-accept command remains a direct,
+  explicitly user-invoked card review path for the foundational workflow.
 
 ### Milestone 6 — Promotion, rollback, and policy control plane
 
+**Implementation status: complete for the manual card lane; non-card lanes and
+automatic promotion remain deliberately gated.**
+
 **Intent:** make improvement reversible and scoped when evidence justifies
   moving it from a candidate into active knowledge.
+
+The implementation adds an append-only `promotion-events.jsonl` log under the
+agent-improvement root. The current state is always rebuilt by replaying that
+log; there is no authoritative mutable index to become stale after a crash.
+Runtime retrieval requires both an active card record and an active promotion
+event for promoted cards. A failed event-store or policy read therefore skips
+improvement context rather than changing behavior on incomplete evidence.
+
+The supported manual workflow is:
+
+```text
+proposals validate --state-store <ROOT> --candidate-store <ROOT> ...
+proposals evaluate --store <ROOT> --candidate-store <ROOT> ...
+proposals accept --store <ROOT> <PROPOSAL>
+proposals promote --store <ROOT> <PROPOSAL>
+proposals status --store <ROOT> <PROPOSAL>
+proposals rollback --store <ROOT> <PROPOSAL>
+```
+
+`evaluate` requires held-out baseline/treatment evidence with matching
+execution and policy fingerprints, no task-success or verification regression,
+and no additional policy-boundary events. `promote` requires the evaluated and
+accepted state, a non-expired proposal, a passing policy scope, and a card
+lane. Skill, `AGENTS.md`, prompt/configuration, and diagnostic lanes remain
+review artifacts that must be applied through their normal diff/review
+process; this subsystem never grants permissions or changes sandbox/approval
+behavior.
+
+The optional `promotion-policy.json` file supports global enable/disable,
+kill-switch, TTL, active-count, and most-specific repository/task-family
+allowlist scopes. If it is absent, the bounded manual defaults are used. If an
+existing policy or event log is malformed, runtime retrieval fails closed and
+promotion commands refuse to proceed.
 
 **Deliverables:**
 
@@ -462,6 +501,15 @@ invoke a model or apply a generated diff.
   and reversible. Manual promotion is the only supported promotion mode at
   first. Any future automatic promotion must be a separately gated experiment,
   disabled by default.
+
+The exit gate is satisfied for the card lane. The implementation records
+candidate fingerprints, target scope, evidence IDs, held-out evaluation
+summaries, actor decisions, expiry, and rollback ancestry in each lifecycle
+projection. The focused suite covers log replay without an index, malformed
+store fail-closed behavior, missing evidence, regression, expiry, stale
+schema, policy scope mismatch, kill switches, TTL filtering, non-card lane
+boundaries, and previous-card rollback. The CLI integration test exercises the
+complete manual lifecycle against a temporary store.
 
 ### Milestone 7 — Slow loop for long-horizon improvement
 
@@ -953,6 +1001,13 @@ missing judge evidence, and cost limits remain explicit, and that aggregate
 results omit prompts, command tokens, and local paths. The evaluator consumes
 pre-recorded baseline/treatment bundles and does not launch live model runs.
 
+Milestone 6 additionally verifies append-only promotion transitions and
+replayable state, evaluation and safety gates, scoped policy allowlists,
+kill-switch and TTL filtering, card-only activation, provenance-bearing
+status output, malformed-store fail-closed behavior, and one-command rollback.
+The focused extension suite has 63 tests and the CLI agent-improvement suite
+has 8 integration tests; both include the complete manual promotion lifecycle.
+
 An earlier broader `cargo test -p codex-core config` run compiled the target
 and then aborted in the unrelated existing
 `tools::handlers::multi_agents::tests::multi_agent_v2_spawn_agent_ignores_configured_max_depth`
@@ -1006,3 +1061,8 @@ cross-task evidence.
 | 5.2 Evidence-linked deterministic card proposer | complete | Stable card proposal IDs, candidate/card/trace/scenario references, concrete held-out validation requirement, and evidence-catalog checks |
 | 5.3 Curator Skill and CLI workflow | complete | `agent-card-curator` drafting/validation workflow; read-only `proposals draft-card` and `proposals validate` commands; no active-store mutation |
 | 5.4 Milestone 5 validation | complete | 56 extension tests, 7 CLI integration tests, 5 CLI parser tests, Skill tests, formatting, and diff checks; live model proposer remains gated |
+| 6.1 Promotion event log and state projection | complete | Versioned append-only JSONL transitions, replayable state, fingerprints, evidence, actors, scope, expiry, and rollback ancestry |
+| 6.2 Evaluation and policy gates | complete | Held-out paired evidence, no-regression checks, execution/policy parity, scoped allowlists, TTLs, active limits, and kill switches |
+| 6.3 Runtime card activation and rollback | complete | Card-only promotion, fail-closed retrieval filtering, previous-card restoration, retirement, and non-card lane boundary |
+| 6.4 Promotion CLI and inspection | complete | Validate/evaluate/accept/promote/rollback/retire/reject/status commands with JSON status/provenance output |
+| 6.5 Milestone 6 validation | complete | 63 extension tests, 8 CLI integration tests, parser coverage, formatting, and policy/store failure tests; automatic promotion remains disabled |

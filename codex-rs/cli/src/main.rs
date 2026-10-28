@@ -10,22 +10,33 @@ use codex_agent_improvement_extension::FeedbackState;
 use codex_agent_improvement_extension::ImprovementCandidate;
 use codex_agent_improvement_extension::ImprovementCandidateStatus;
 use codex_agent_improvement_extension::ImprovementEvidenceCatalog;
+use codex_agent_improvement_extension::accept_proposal;
 use codex_agent_improvement_extension::append_card;
 use codex_agent_improvement_extension::candidates_path;
 use codex_agent_improvement_extension::cards_path;
+use codex_agent_improvement_extension::current_unix_ms;
 use codex_agent_improvement_extension::evaluate_manifest;
+use codex_agent_improvement_extension::evaluate_proposal;
 use codex_agent_improvement_extension::find_candidate;
 use codex_agent_improvement_extension::load_candidates;
 use codex_agent_improvement_extension::load_cards;
 use codex_agent_improvement_extension::load_evaluation_manifest;
 use codex_agent_improvement_extension::load_improvement_candidate;
+use codex_agent_improvement_extension::load_promotion_policy;
+use codex_agent_improvement_extension::load_runtime_cards;
+use codex_agent_improvement_extension::promote_proposal_with_policy;
+use codex_agent_improvement_extension::promotion_status;
 use codex_agent_improvement_extension::record_card_feedback;
 use codex_agent_improvement_extension::record_card_outcome;
+use codex_agent_improvement_extension::reject_proposal;
 use codex_agent_improvement_extension::render_cards;
 use codex_agent_improvement_extension::retire_card;
+use codex_agent_improvement_extension::retire_proposal;
+use codex_agent_improvement_extension::rollback_proposal;
 use codex_agent_improvement_extension::select_relevant;
 use codex_agent_improvement_extension::summarize_rollout;
 use codex_agent_improvement_extension::update_candidate_status;
+use codex_agent_improvement_extension::validate_proposal;
 use codex_agent_improvement_extension::write_evaluation_result;
 use codex_agent_improvement_extension::write_improvement_candidate;
 use codex_app_server_daemon::BootstrapOptions as AppServerBootstrapOptions;
@@ -397,6 +408,27 @@ enum DebugAgentImprovementProposalsSubcommand {
 
     /// Validate a proposal, optionally against candidate and evaluation evidence.
     Validate(DebugAgentImprovementProposalValidateCommand),
+
+    /// Record a held-out evaluation result for a validated proposal.
+    Evaluate(DebugAgentImprovementProposalEvaluateCommand),
+
+    /// Record the explicit human decision that an evaluated proposal is accepted.
+    Accept(DebugAgentImprovementProposalStateCommand),
+
+    /// Activate an accepted card proposal under the promotion policy.
+    Promote(DebugAgentImprovementProposalPromoteCommand),
+
+    /// Roll back an active card proposal and restore its previous card when available.
+    Rollback(DebugAgentImprovementProposalStateCommand),
+
+    /// Retire an active proposal without rewriting unrelated cards.
+    Retire(DebugAgentImprovementProposalStateCommand),
+
+    /// Reject a proposal before it becomes active.
+    Reject(DebugAgentImprovementProposalRejectCommand),
+
+    /// Inspect the append-only promotion status and provenance for a proposal.
+    Status(DebugAgentImprovementProposalStatusCommand),
 }
 
 #[derive(Debug, Parser)]
@@ -435,6 +467,105 @@ struct DebugAgentImprovementProposalValidateCommand {
     /// Redacted evaluation result JSON files used to verify scenario evidence.
     #[arg(long = "evaluation-results", value_name = "FILE")]
     evaluation_results: Vec<PathBuf>,
+
+    /// Optional promotion root. When supplied, append the validated transition.
+    #[arg(long = "state-store", value_name = "DIR")]
+    state_store: Option<PathBuf>,
+
+    /// Actor recorded in the append-only promotion event.
+    #[arg(long = "actor", value_name = "ACTOR", default_value = "user")]
+    actor: String,
+}
+
+#[derive(Debug, Parser)]
+struct DebugAgentImprovementProposalEvaluateCommand {
+    /// Proposal JSON file.
+    #[arg(value_name = "PROPOSAL")]
+    proposal: PathBuf,
+
+    /// Promotion root containing promotion-events.jsonl and candidates.jsonl.
+    #[arg(long = "store", value_name = "DIR", required = true)]
+    store: PathBuf,
+
+    /// Candidate store used to verify proposal and trace evidence.
+    #[arg(long = "candidate-store", value_name = "DIR", required = true)]
+    candidate_store: PathBuf,
+
+    /// Redacted evaluation result JSON files.
+    #[arg(long = "evaluation-results", value_name = "FILE", required = true)]
+    evaluation_results: Vec<PathBuf>,
+
+    /// Actor recorded in the append-only promotion event.
+    #[arg(long = "actor", value_name = "ACTOR", default_value = "user")]
+    actor: String,
+}
+
+#[derive(Debug, Parser)]
+struct DebugAgentImprovementProposalStateCommand {
+    /// Proposal JSON file.
+    #[arg(value_name = "PROPOSAL")]
+    proposal: PathBuf,
+
+    /// Promotion root containing promotion-events.jsonl and cards.jsonl.
+    #[arg(long = "store", value_name = "DIR", required = true)]
+    store: PathBuf,
+
+    /// Actor recorded in the append-only promotion event.
+    #[arg(long = "actor", value_name = "ACTOR", default_value = "user")]
+    actor: String,
+}
+
+#[derive(Debug, Parser)]
+struct DebugAgentImprovementProposalPromoteCommand {
+    /// Proposal JSON file.
+    #[arg(value_name = "PROPOSAL")]
+    proposal: PathBuf,
+
+    /// Promotion root containing promotion-events.jsonl and cards.jsonl.
+    #[arg(long = "store", value_name = "DIR", required = true)]
+    store: PathBuf,
+
+    /// Optional explicit policy JSON file. The root policy is used by default.
+    #[arg(long = "policy", value_name = "FILE")]
+    policy: Option<PathBuf>,
+
+    /// Actor recorded in the append-only promotion event.
+    #[arg(long = "actor", value_name = "ACTOR", default_value = "user")]
+    actor: String,
+}
+
+#[derive(Debug, Parser)]
+struct DebugAgentImprovementProposalRejectCommand {
+    /// Proposal JSON file.
+    #[arg(value_name = "PROPOSAL")]
+    proposal: PathBuf,
+
+    /// Promotion root containing promotion-events.jsonl.
+    #[arg(long = "store", value_name = "DIR", required = true)]
+    store: PathBuf,
+
+    /// Actor recorded in the append-only promotion event.
+    #[arg(long = "actor", value_name = "ACTOR", default_value = "user")]
+    actor: String,
+
+    /// Human-readable rejection reason retained in the event log.
+    #[arg(
+        long = "reason",
+        value_name = "TEXT",
+        default_value = "human reviewer rejected proposal"
+    )]
+    reason: String,
+}
+
+#[derive(Debug, Parser)]
+struct DebugAgentImprovementProposalStatusCommand {
+    /// Proposal JSON file.
+    #[arg(value_name = "PROPOSAL")]
+    proposal: PathBuf,
+
+    /// Promotion root containing promotion-events.jsonl.
+    #[arg(long = "store", value_name = "DIR", required = true)]
+    store: PathBuf,
 }
 
 #[derive(Debug, Parser)]
@@ -2407,30 +2538,26 @@ fn run_debug_agent_improvement_proposals_command(
             let proposal = load_improvement_candidate(&cmd.proposal)?;
             let has_evidence_inputs =
                 cmd.candidate_store.is_some() || !cmd.evaluation_results.is_empty();
-            if has_evidence_inputs {
-                let mut catalog = cmd
-                    .candidate_store
-                    .as_ref()
-                    .map(|store| {
-                        load_candidates(store).map(|candidates| {
-                            ImprovementEvidenceCatalog::from_candidates(&candidates)
-                        })
-                    })
-                    .transpose()?
-                    .unwrap_or_default();
-                for result_path in cmd.evaluation_results {
-                    let file = std::fs::File::open(&result_path).map_err(|error| {
-                        anyhow::anyhow!("open evaluation result {}: {error}", result_path.display())
-                    })?;
-                    let result: codex_agent_improvement_extension::EvaluationResult =
-                        serde_json::from_reader(file).map_err(|error| {
-                            anyhow::anyhow!(
-                                "parse evaluation result {}: {error}",
-                                result_path.display()
-                            )
-                        })?;
-                    catalog.add_evaluation_result(&result)?;
-                }
+            let catalog = if has_evidence_inputs {
+                Some(load_promotion_evidence_catalog(
+                    cmd.candidate_store.as_deref(),
+                    &cmd.evaluation_results,
+                )?)
+            } else {
+                None
+            };
+            if let Some(state_store) = cmd.state_store {
+                let status = validate_proposal(
+                    &state_store,
+                    &proposal,
+                    &cmd.actor,
+                    current_unix_ms(),
+                    catalog.as_ref(),
+                )?;
+                println!("{}", serde_json::to_string_pretty(&status)?);
+                return Ok(());
+            }
+            if let Some(catalog) = catalog {
                 proposal.validate_against(&catalog)?;
             } else {
                 proposal.validate()?;
@@ -2441,8 +2568,105 @@ fn run_debug_agent_improvement_proposals_command(
             );
             println!("{}", serde_json::to_string_pretty(&proposal)?);
         }
+        DebugAgentImprovementProposalsSubcommand::Evaluate(cmd) => {
+            let proposal = load_improvement_candidate(&cmd.proposal)?;
+            let results = load_evaluation_results(&cmd.evaluation_results)?;
+            let catalog = load_promotion_evidence_catalog(
+                Some(&cmd.candidate_store),
+                &cmd.evaluation_results,
+            )?;
+            let status = evaluate_proposal(
+                &cmd.store,
+                &proposal,
+                &results,
+                &catalog,
+                &cmd.actor,
+                current_unix_ms(),
+            )?;
+            println!("{}", serde_json::to_string_pretty(&status)?);
+        }
+        DebugAgentImprovementProposalsSubcommand::Accept(cmd) => {
+            let proposal = load_improvement_candidate(&cmd.proposal)?;
+            let status = accept_proposal(&cmd.store, &proposal, &cmd.actor, current_unix_ms())?;
+            println!("{}", serde_json::to_string_pretty(&status)?);
+        }
+        DebugAgentImprovementProposalsSubcommand::Promote(cmd) => {
+            let proposal = load_improvement_candidate(&cmd.proposal)?;
+            let policy = if let Some(policy_path) = cmd.policy {
+                load_promotion_policy(&policy_path)?
+            } else {
+                codex_agent_improvement_extension::load_promotion_policy_for_root(&cmd.store)?
+            };
+            let status = promote_proposal_with_policy(
+                &cmd.store,
+                &proposal,
+                &cmd.actor,
+                current_unix_ms(),
+                &policy,
+            )?;
+            println!("{}", serde_json::to_string_pretty(&status)?);
+        }
+        DebugAgentImprovementProposalsSubcommand::Rollback(cmd) => {
+            let proposal = load_improvement_candidate(&cmd.proposal)?;
+            let status = rollback_proposal(&cmd.store, &proposal, &cmd.actor, current_unix_ms())?;
+            println!("{}", serde_json::to_string_pretty(&status)?);
+        }
+        DebugAgentImprovementProposalsSubcommand::Retire(cmd) => {
+            let proposal = load_improvement_candidate(&cmd.proposal)?;
+            let status = retire_proposal(&cmd.store, &proposal, &cmd.actor, current_unix_ms())?;
+            println!("{}", serde_json::to_string_pretty(&status)?);
+        }
+        DebugAgentImprovementProposalsSubcommand::Reject(cmd) => {
+            let proposal = load_improvement_candidate(&cmd.proposal)?;
+            let status = reject_proposal(
+                &cmd.store,
+                &proposal,
+                &cmd.actor,
+                current_unix_ms(),
+                cmd.reason,
+            )?;
+            println!("{}", serde_json::to_string_pretty(&status)?);
+        }
+        DebugAgentImprovementProposalsSubcommand::Status(cmd) => {
+            let proposal = load_improvement_candidate(&cmd.proposal)?;
+            let status = promotion_status(&cmd.store, &proposal)?;
+            println!("{}", serde_json::to_string_pretty(&status)?);
+        }
     }
     Ok(())
+}
+
+fn load_evaluation_results(
+    paths: &[PathBuf],
+) -> anyhow::Result<Vec<codex_agent_improvement_extension::EvaluationResult>> {
+    let mut results = Vec::with_capacity(paths.len());
+    for result_path in paths {
+        let file = std::fs::File::open(result_path).map_err(|error| {
+            anyhow::anyhow!("open evaluation result {}: {error}", result_path.display())
+        })?;
+        let result = serde_json::from_reader(file).map_err(|error| {
+            anyhow::anyhow!("parse evaluation result {}: {error}", result_path.display())
+        })?;
+        results.push(result);
+    }
+    Ok(results)
+}
+
+fn load_promotion_evidence_catalog(
+    candidate_store: Option<&std::path::Path>,
+    evaluation_results: &[PathBuf],
+) -> anyhow::Result<ImprovementEvidenceCatalog> {
+    let mut catalog = candidate_store
+        .map(|store| {
+            load_candidates(store)
+                .map(|candidates| ImprovementEvidenceCatalog::from_candidates(&candidates))
+        })
+        .transpose()?
+        .unwrap_or_default();
+    for result in load_evaluation_results(evaluation_results)? {
+        catalog.add_evaluation_result(&result)?;
+    }
+    Ok(catalog)
 }
 
 fn path_identity_for_cli(path: &PathBuf) -> PathBuf {
@@ -2478,7 +2702,7 @@ async fn run_debug_agent_improvement_summarize_command(
 fn run_debug_agent_improvement_render_command(
     cmd: DebugAgentImprovementRenderCommand,
 ) -> anyhow::Result<()> {
-    let cards = load_cards(&cmd.store)?;
+    let cards = load_runtime_cards(&cmd.store, current_unix_ms())?;
     let selected = select_relevant(&cards, &cmd.query, cmd.max_cards);
     println!("{}", render_cards(&selected, cmd.max_context_tokens));
     Ok(())
@@ -4199,6 +4423,76 @@ enabled = true
             command.evaluation_results,
             vec![PathBuf::from("/tmp/results.json")]
         );
+    }
+
+    #[test]
+    fn debug_agent_improvement_proposals_parse_promotion_lifecycle_commands() {
+        let commands = vec![
+            vec![
+                "validate",
+                "/tmp/proposal.json",
+                "--state-store",
+                "/tmp/agent-improvement",
+                "--candidate-store",
+                "/tmp/agent-improvement",
+            ],
+            vec![
+                "evaluate",
+                "/tmp/proposal.json",
+                "--store",
+                "/tmp/agent-improvement",
+                "--candidate-store",
+                "/tmp/agent-improvement",
+                "--evaluation-results",
+                "/tmp/results.json",
+            ],
+            vec![
+                "accept",
+                "/tmp/proposal.json",
+                "--store",
+                "/tmp/agent-improvement",
+            ],
+            vec![
+                "promote",
+                "/tmp/proposal.json",
+                "--store",
+                "/tmp/agent-improvement",
+                "--policy",
+                "/tmp/policy.json",
+            ],
+            vec![
+                "rollback",
+                "/tmp/proposal.json",
+                "--store",
+                "/tmp/agent-improvement",
+            ],
+            vec![
+                "retire",
+                "/tmp/proposal.json",
+                "--store",
+                "/tmp/agent-improvement",
+            ],
+            vec![
+                "reject",
+                "/tmp/proposal.json",
+                "--store",
+                "/tmp/agent-improvement",
+                "--reason",
+                "not reproducible",
+            ],
+            vec![
+                "status",
+                "/tmp/proposal.json",
+                "--store",
+                "/tmp/agent-improvement",
+            ],
+        ];
+
+        for command in commands {
+            let mut args = vec!["codex", "debug", "agent-improvement", "proposals"];
+            args.extend(command);
+            MultitoolCli::try_parse_from(args).expect("promotion command parses");
+        }
     }
 
     #[test]
