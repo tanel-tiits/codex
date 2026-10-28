@@ -22,6 +22,7 @@ use crossterm::event::MouseEventKind::Drag;
 use crossterm::event::MouseEventKind::Up;
 use pretty_assertions::assert_eq;
 use ratatui::buffer::Buffer;
+use ratatui::buffer::CellDiffOption;
 
 pub(in crate::app) fn user_cell(message: &str) -> Arc<dyn HistoryCell> {
     Arc::new(UserHistoryCell {
@@ -193,6 +194,45 @@ async fn list_spacing_completion_preserves_the_scrolled_reader() -> Result<()> {
     app.transcript_view
         .render(area, &mut after, &app.transcript_cells);
     assert_eq!(buffer_text(&after), buffer_text(&before));
+    Ok(())
+}
+
+#[tokio::test]
+async fn finalized_owned_transcript_invalidates_the_terminal_viewport() -> Result<()> {
+    let mut app = crate::app::test_support::make_test_app().await;
+    app.transcript_cells = vec![Arc::new(history_cell::AgentMessageCell::new(
+        vec![
+            "Before boundary.".into(),
+            "  device_class: battery".into(),
+            "  • Subsequent bullet".into(),
+        ],
+        /*is_first_line*/ true,
+    ))];
+    let mut tui = crate::tui::test_support::make_test_tui()?;
+    tui.set_owned_screen(/*owned*/ true)?;
+    let size = Size::new(80, 12);
+    tui.terminal.resize(size)?;
+    app.render_owned_transcript(&mut tui, size)?;
+
+    app.handle_consolidate_agent_message(
+        &mut tui,
+        crate::history_cell::AgentMarkdownCell::new(
+            "Before boundary.\n\n`device_class: battery`\n\n- Subsequent bullet".into(),
+            &app.config.cwd,
+        ),
+        ConsolidationScrollbackReflow::IfResizeReflowRan,
+        /*deferred_history_cell*/ None,
+    )?;
+
+    assert!(
+        tui.terminal
+            .previous_buffer()
+            .content()
+            .iter()
+            .any(|cell| cell.diff_option == CellDiffOption::AlwaysUpdate),
+        "finalizing an owned response must force a repaint of the viewport"
+    );
+    tui.set_owned_screen(/*owned*/ false)?;
     Ok(())
 }
 

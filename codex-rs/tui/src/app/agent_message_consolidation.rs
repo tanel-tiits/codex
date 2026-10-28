@@ -97,6 +97,10 @@ impl App {
         if tui.is_owned_screen() {
             self.transcript_reflow.clear_pending_reflow();
             self.transcript_reflow.clear_stream_flags();
+            // The streaming renderer may have painted cells while a transient style such as DIM
+            // was active. The finalized transcript can leave those cells logically unchanged, so
+            // the differential renderer would otherwise skip repainting them.
+            tui.terminal.invalidate_viewport();
             tui.frame_requester().schedule_frame();
             return Ok(());
         }

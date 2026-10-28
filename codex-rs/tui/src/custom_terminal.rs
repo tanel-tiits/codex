@@ -1386,6 +1386,83 @@ mod tests {
     }
 
     #[test]
+    fn invalidate_viewport_repairs_dim_cells_left_by_streaming_frame() {
+        let width = 40;
+        let height = 4;
+        let area = Rect::new(0, 0, width, height);
+        let mut terminal =
+            Terminal::with_options(VT100Backend::new(width, height)).expect("terminal");
+        terminal.set_viewport_area(area);
+
+        // A streamed response can write cells while a terminal attribute such as DIM is active.
+        // The terminal resets its current style after the frame, but those cells remain dim until
+        // they are explicitly repainted.
+        write!(terminal.backend_mut(), "\x1b[2m").expect("leave terminal dim");
+        terminal
+            .draw(|frame| {
+                Paragraph::new(vec![
+                    Line::from("Before boundary."),
+                    Line::from(vec![
+                        "device_class: battery".fg(Color::Blue),
+                        " after boundary".into(),
+                    ]),
+                    Line::from("• Subsequent bullet"),
+                ])
+                .render(area, frame.buffer_mut());
+            })
+            .expect("streaming draw");
+
+        terminal
+            .draw(|frame| {
+                Paragraph::new(vec![
+                    Line::from("Before boundary."),
+                    Line::from(vec![
+                        "device_class: battery".fg(Color::LightBlue),
+                        " after boundary".into(),
+                    ]),
+                    Line::from("• Subsequent bullet"),
+                ])
+                .render(area, frame.buffer_mut());
+            })
+            .expect("finalized draw");
+
+        assert!(
+            terminal
+                .backend()
+                .vt100()
+                .screen()
+                .cell(2, 0)
+                .is_some_and(vt100::Cell::dim),
+            "unchanged cells retain the stale DIM attribute without invalidation"
+        );
+
+        terminal.invalidate_viewport();
+        terminal
+            .draw(|frame| {
+                Paragraph::new(vec![
+                    Line::from("Before boundary."),
+                    Line::from(vec![
+                        "device_class: battery".fg(Color::LightBlue),
+                        " after boundary".into(),
+                    ]),
+                    Line::from("• Subsequent bullet"),
+                ])
+                .render(area, frame.buffer_mut());
+            })
+            .expect("redraw invalidated viewport");
+
+        assert!(
+            !terminal
+                .backend()
+                .vt100()
+                .screen()
+                .cell(2, 0)
+                .is_some_and(vt100::Cell::dim),
+            "invalidating the viewport repaints the unchanged cells without DIM"
+        );
+    }
+
+    #[test]
     fn terminal_draw_moves_cursor_before_showing_it() {
         let cursor_position = Position { x: 1, y: 0 };
         let mut terminal =
