@@ -125,7 +125,7 @@ satisfied.
 | 8a.2. Evaluator and retrieval hardening | Preflight evaluator contracts, bounded live retrieval, and separate selection/exposure evidence make the next pilot trustworthy | Essential before Milestone 8 | 8a.1 | Complete; opt-in/manual; no automatic promotion |
 | 8a.3. Benchmark and evaluator qualification | A realistic, non-ceiling task pack and adversarial evaluator fixtures make behavioral claims trustworthy | Essential | 8a.2 | In progress; contract and no-model qualification harness implemented, private pack/calibration/review pending |
 | 8a.4. Intervention cards and scoped retrieval | Cards contain a trigger, one bounded action, a verification target, and explicit scope; retrieval is task-local and low-noise | High value | 8a.3 | In progress; implementation and focused tests complete, offline exit gate pending |
-| 8a.5. Causal exposure and action telemetry | Private evidence distinguishes card selection, injection, attempted action, verification, and outcome without claiming causation from exposure | Essential | 8a.4 | Planned |
+| 8a.5. Causal exposure and action telemetry | Private evidence distinguishes card selection, injection, attempted action, verification, and outcome without claiming causation from exposure | Essential | 8a.4 | Complete; synthetic qualification only; no behavioral claim |
 | 8a.6. Repeated practical-value pilot | A preregistered 32–48-task study tests correctness, recovery, cost, and negative transfer across repeated trials | Essential decision gate | 8a.3–8a.5 | Planned |
 | 8a.7. Scoped canary and operating loop | A passing intervention can be manually activated for a narrow scope with TTL, monitoring, and rollback | Conditional high value | 8a.6 | Planned; only if 8a.6 passes |
 | 8. Optional program-level evolution and transfer | Isolated evolution of skills, prompts, or extension policy can be explored across task families without mutating the live agent | Research only | 8a.6–8a.7 | Planned; do not start before practical-value gates |
@@ -877,8 +877,8 @@ the scoped policy still presents generic cards on unrelated tasks.
 
 ### Milestone 8a.5 — Causal exposure and action telemetry
 
-**Implementation status: planned; attribution remains unknown until this
-milestone is complete.**
+**Implementation status: complete; attribution remains unknown for any live
+behavioral claim until a qualified pilot is run.**
 
 Exposure alone cannot explain an outcome. This milestone records the smallest
 private event chain needed to distinguish a card being available from an agent
@@ -1577,6 +1577,27 @@ and 128 isolated fixture copies without model execution and confirms cleanup.
 The private benchmark pack, real baseline observations, and independent review
 remain outstanding, so the 8a.3 exit gate is not yet claimed.
 
+Milestone 8a.4 implementation adds versioned trigger/action/verification
+interventions, deterministic task-local one-card retrieval, bounded rendering,
+and the offline broad-versus-scoped retrieval report. Its implementation is
+present, but the exit gate still requires a separately reviewed private case
+set and a report showing preserved relevant-card coverage without irrelevant
+generic fallback.
+
+Milestone 8a.5 adds a private per-task intervention context and event chain for
+selected, injected, action-attempted, agent-verification-attempted,
+independent-verification-passed, and outcome evidence. Public evaluation
+results retain only bounded counts and coarse attribution states. Structured
+action signatures use exact token matching, missing evidence remains unknown,
+interrupted/cost-limited runs remain partial, and independent post-run checks
+remain distinct from agent verification. The focused extension suite now has
+98 tests and the CLI agent-improvement integration suite has 11 tests covering
+synthetic attribution sequences, duplicate injection/card evidence, false
+signature matches, redaction, private-manifest materialization, baseline
+no-exposure, failure handling, and the intervention live-plan gate. This is
+an observability gate only; no live behavioral pilot or automatic promotion is
+enabled.
+
 An earlier broader `cargo test -p codex-core config` run compiled the target
 and then aborted in the unrelated existing
 `tools::handlers::multi_agents::tests::multi_agent_v2_spawn_agent_ignores_configured_max_depth`
@@ -1645,7 +1666,7 @@ cross-task evidence.
 | 8a.1 Independent evaluation and observability hardening | complete | Post-run argv checks before cleanup, redacted check evidence, trace/policy separation, bounded evaluator time, live-plan cap, 77 extension tests, and 10 CLI integration tests |
 | 8a.2 Evaluator and retrieval hardening | complete | Preflight contracts, bounded relevance/exposure evidence, redacted selection fingerprints, config/schema tests, 79 extension tests, 383 config tests, and 10 CLI integration tests |
 | 8a.3 Benchmark and evaluator qualification | in progress | Versioned manifest/projection, no-model fixture qualification and calibration commands/tests; private non-ceiling pack and independent review still required |
-| 8a.4 Intervention cards and task-local retrieval | planned | Versioned trigger/action/verification cards, scoped one-card retrieval, 300–600-token rendering, and offline precision/negative-transfer report |
-| 8a.5 Causal exposure and action telemetry | planned | Private selected/injected/attempted/verified event chain, redacted aggregates, and unknown-attribution tests |
+| 8a.4 Intervention cards and task-local retrieval | in progress | Implementation complete; separately reviewed private retrieval cases and the offline precision/negative-transfer exit report remain required |
+| 8a.5 Causal exposure and action telemetry | complete | Private selected/injected/attempted/verified event chain, aggregate-only results, exact signature matching, partial-run unknown handling, and 98 extension / 11 CLI tests |
 | 8a.6 Repeated practical-value pilot | planned | Preregistered 32–48-task, two-trial paired study with task/family deltas, cost accounting, and explicit go/no-go decision |
 | 8a.7 Scoped canary and operating loop | planned | Conditional one-card canary with allowlist, TTL, telemetry review, rollback, and retirement evidence |

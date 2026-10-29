@@ -31,16 +31,22 @@ use serde::Serialize;
 use crate::AttributionState;
 use crate::FailureClass;
 use crate::FailureSignature;
+use crate::InterventionTelemetryAggregate;
+use crate::InterventionTelemetryContext;
+use crate::InterventionTelemetryEvidence;
+use crate::InterventionTelemetryResult;
+use crate::MAX_INTERVENTION_SIGNATURES;
 use crate::TaskFamily;
 use crate::TokenUsageSummary;
+use crate::derive_intervention_telemetry;
 use crate::summarize_rollout;
 
 /// Version of the local scenario manifest contract.
 pub const EVALUATION_MANIFEST_SCHEMA_VERSION: u32 = 2;
 /// Version of the aggregate result contract.
-pub const EVALUATION_RESULT_SCHEMA_VERSION: u32 = 4;
+pub const EVALUATION_RESULT_SCHEMA_VERSION: u32 = 5;
 /// Version of the deterministic evaluator contract included in every result.
-pub const EVALUATOR_VERSION: u32 = 1;
+pub const EVALUATOR_VERSION: u32 = 2;
 
 const MAX_SCENARIOS: usize = 512;
 const MAX_CHECKS: usize = 16;
@@ -144,6 +150,10 @@ pub struct EvaluationCondition {
     /// Private retrieval evidence; raw card IDs never enter the redacted result.
     #[serde(default)]
     pub retrieval: EvaluationRetrievalEvidence,
+    /// Private context and event chain for intervention attribution. It is
+    /// never copied into the aggregate evaluation result.
+    #[serde(default)]
+    pub intervention_telemetry: Option<InterventionTelemetryEvidence>,
     #[serde(default)]
     pub judge: Option<JudgeLabel>,
     /// Private evidence produced by evaluator-side post-run checks.
@@ -188,6 +198,9 @@ pub struct EvaluationRetrievalEvidence {
     pub selected_card_ids: Vec<String>,
     #[serde(default)]
     pub exposure_count: u64,
+    /// Private injection evidence for the intervention lane.
+    #[serde(default)]
+    pub injection_count: u64,
 }
 
 /// Redacted retrieval evidence published alongside condition metrics.
@@ -390,6 +403,17 @@ fn validate_scenario(scenario: &EvaluationScenario) -> Result<()> {
     )?;
     validate_condition(&scenario.baseline, "baseline")?;
     validate_condition(&scenario.treatment, "treatment")?;
+    for (label, condition) in [
+        ("baseline", &scenario.baseline),
+        ("treatment", &scenario.treatment),
+    ] {
+        if let Some(telemetry) = &condition.intervention_telemetry {
+            ensure!(
+                telemetry.context.task_id == scenario.task.task_id,
+                "{label}.intervention_telemetry task ID does not match scenario task"
+            );
+        }
+    }
 
     ensure!(
         !scenario.baseline.memory.enabled,
@@ -492,6 +516,19 @@ fn validate_condition(condition: &EvaluationCondition, label: &str) -> Result<()
             selected_card_ids.insert(card_id),
             "{label}.retrieval contains duplicate card IDs"
         );
+    }
+    ensure!(
+        condition.retrieval.injection_count <= 1024,
+        "{label}.retrieval contains too many injections"
+    );
+    if let Some(telemetry) = &condition.intervention_telemetry {
+        telemetry.validate()?;
+        if telemetry.context.selected_card_ids.is_empty() {
+            ensure!(
+                condition.retrieval.selected_card_ids.len() <= MAX_INTERVENTION_SIGNATURES,
+                "{label}.retrieval has too many selected cards to link to intervention telemetry"
+            );
+        }
     }
     if let Some(judge) = &condition.judge {
         ensure_id(&judge.label_id, &format!("{label}.judge.label_id"))?;
@@ -623,6 +660,49 @@ pub fn evaluate_manifest_at(
     ))
 }
 
+/// Populate the private event chain after evaluation has produced the
+/// condition outcomes. Raw event evidence remains in the private manifest;
+/// callers must persist that manifest separately from the aggregate result.
+pub fn materialize_intervention_telemetry(
+    manifest: &mut EvaluationManifest,
+    result: &EvaluationResult,
+) -> Result<()> {
+    ensure!(
+        manifest.scenarios.len() == result.scenarios.len(),
+        "evaluation result scenario count does not match manifest"
+    );
+    for (scenario, evaluated) in manifest.scenarios.iter_mut().zip(&result.scenarios) {
+        ensure!(
+            scenario.scenario_id == evaluated.scenario_id,
+            "evaluation result scenario order does not match manifest"
+        );
+        for (condition, condition_result) in [
+            (&mut scenario.baseline, &evaluated.baseline),
+            (&mut scenario.treatment, &evaluated.treatment),
+        ] {
+            let Some(existing) = condition.intervention_telemetry.as_ref() else {
+                continue;
+            };
+            if !existing.events.is_empty() {
+                continue;
+            }
+            let trace = replay_bundle(&condition.trace_bundle).ok();
+            let Some(derived) = intervention_evidence_for_condition(
+                condition,
+                trace.as_ref(),
+                condition.post_run.as_ref(),
+                condition_result.evaluator.task_success,
+            ) else {
+                continue;
+            };
+            if let Some(evidence) = &mut condition.intervention_telemetry {
+                evidence.events = derived.events;
+            }
+        }
+    }
+    manifest.validate()
+}
+
 /// Persist aggregate results without exposing prompts, local paths, command
 /// tokens, or judge evidence references.
 pub fn write_evaluation_result(
@@ -710,17 +790,24 @@ fn evaluate_condition(
     let trace_size = match bundle_size(&condition.trace_bundle) {
         Ok(size) => size,
         Err(_) => {
+            let evaluator = evaluate_with_spec(
+                None,
+                None,
+                &scenario.evaluator,
+                condition.judge.as_ref(),
+                condition.post_run.as_ref(),
+            );
             return EvaluatedCondition {
                 trace_id: None,
                 metrics: None,
                 status: EvaluationStatus::TraceUnavailable,
-                evaluator: evaluate_with_spec(
+                intervention: intervention_telemetry_for_condition(
+                    condition,
                     None,
-                    None,
-                    &scenario.evaluator,
-                    condition.judge.as_ref(),
                     condition.post_run.as_ref(),
+                    evaluator.task_success,
                 ),
+                evaluator,
                 error_code: Some(EvaluationErrorCode::TraceUnavailable),
             };
         }
@@ -737,11 +824,18 @@ fn evaluate_condition(
         } else {
             EvaluatorResult::unavailable()
         };
+        let outcome = evaluator.task_success;
         return EvaluatedCondition {
             trace_id: None,
             metrics: None,
             status: EvaluationStatus::CostLimited,
             evaluator,
+            intervention: intervention_telemetry_for_condition(
+                condition,
+                None,
+                condition.post_run.as_ref(),
+                outcome,
+            ),
             error_code: Some(EvaluationErrorCode::TraceTooLarge),
         };
     }
@@ -749,17 +843,24 @@ fn evaluate_condition(
     let trace = match replay_bundle(&condition.trace_bundle) {
         Ok(trace) => trace,
         Err(_) => {
+            let evaluator = evaluate_with_spec(
+                None,
+                None,
+                &scenario.evaluator,
+                condition.judge.as_ref(),
+                condition.post_run.as_ref(),
+            );
             return EvaluatedCondition {
                 trace_id: None,
                 metrics: None,
                 status: EvaluationStatus::TraceUnavailable,
-                evaluator: evaluate_with_spec(
+                intervention: intervention_telemetry_for_condition(
+                    condition,
                     None,
-                    None,
-                    &scenario.evaluator,
-                    condition.judge.as_ref(),
                     condition.post_run.as_ref(),
+                    evaluator.task_success,
                 ),
+                evaluator,
                 error_code: Some(EvaluationErrorCode::TraceReplayFailed),
             };
         }
@@ -786,11 +887,20 @@ fn evaluate_condition(
         } else {
             EvaluatorResult::unavailable()
         };
+        let outcome = evaluator.task_success;
+        let intervention = intervention_telemetry_for_condition(
+            condition,
+            Some(&trace),
+            condition.post_run.as_ref(),
+            outcome,
+        );
+        let trace_id = trace.trace_id.clone();
         return EvaluatedCondition::with_metrics(
-            trace.trace_id,
+            trace_id,
             metrics,
             EvaluationStatus::CostLimited,
             evaluator,
+            intervention,
             Some(EvaluationErrorCode::CostLimitExceeded),
         );
     }
@@ -813,7 +923,111 @@ fn evaluate_condition(
             Some(EvaluationErrorCode::EvaluatorFailed),
         ),
     };
-    EvaluatedCondition::with_metrics(trace.trace_id, metrics, status, evaluator, error_code)
+    let intervention = intervention_telemetry_for_condition(
+        condition,
+        Some(&trace),
+        condition.post_run.as_ref(),
+        evaluator.task_success,
+    );
+    EvaluatedCondition::with_metrics(
+        trace.trace_id,
+        metrics,
+        status,
+        evaluator,
+        intervention,
+        error_code,
+    )
+}
+
+fn intervention_telemetry_for_condition(
+    condition: &EvaluationCondition,
+    trace: Option<&RolloutTrace>,
+    post_run: Option<&PostRunEvidence>,
+    outcome: Option<bool>,
+) -> InterventionTelemetryResult {
+    let Some(evidence) = intervention_evidence_for_condition(condition, trace, post_run, outcome)
+    else {
+        return InterventionTelemetryResult::without_intervention(outcome);
+    };
+    evidence.to_result()
+}
+
+fn intervention_evidence_for_condition(
+    condition: &EvaluationCondition,
+    trace: Option<&RolloutTrace>,
+    post_run: Option<&PostRunEvidence>,
+    outcome: Option<bool>,
+) -> Option<InterventionTelemetryEvidence> {
+    let evidence = condition.intervention_telemetry.as_ref()?;
+    if !evidence.events.is_empty() {
+        return Some(evidence.clone());
+    }
+    let selected_card_count = condition
+        .retrieval
+        .selected_card_ids
+        .len()
+        .max(evidence.context.selected_card_ids.len());
+    let injection_count = condition
+        .retrieval
+        .injection_count
+        .max(condition.retrieval.exposure_count)
+        .max(u64::from(evidence.context.injection_count));
+    let mut context = evidence.context.clone();
+    if context.selected_card_ids.is_empty()
+        && condition.retrieval.selected_card_ids.len() <= MAX_INTERVENTION_SIGNATURES
+    {
+        context.selected_card_ids = condition.retrieval.selected_card_ids.clone();
+    }
+    if context.injection_count == 0 {
+        context.injection_count = u32::try_from(injection_count).unwrap_or(u32::MAX);
+    }
+    Some(derive_intervention_telemetry(
+        &context,
+        selected_card_count,
+        injection_count,
+        trace,
+        independent_verification_passed(&context, post_run),
+        telemetry_outcome(trace, outcome),
+    ))
+}
+
+fn independent_verification_passed(
+    context: &InterventionTelemetryContext,
+    post_run: Option<&PostRunEvidence>,
+) -> Option<bool> {
+    let post_run = post_run?;
+    let checks = if context.independent_verification_check_ids.is_empty() {
+        post_run.checks.iter().collect::<Vec<_>>()
+    } else {
+        let checks = context
+            .independent_verification_check_ids
+            .iter()
+            .filter_map(|check_id| {
+                post_run
+                    .checks
+                    .iter()
+                    .find(|check| &check.check_id == check_id)
+            })
+            .collect::<Vec<_>>();
+        if checks.len() != context.independent_verification_check_ids.len() {
+            return None;
+        }
+        checks
+    };
+    (!checks.is_empty()).then(|| checks.iter().all(|check| check.success))
+}
+
+fn telemetry_outcome(trace: Option<&RolloutTrace>, outcome: Option<bool>) -> Option<bool> {
+    if trace.is_some_and(|trace| {
+        matches!(
+            trace.status,
+            RolloutStatus::Aborted | RolloutStatus::Running
+        )
+    }) {
+        None
+    } else {
+        outcome
+    }
 }
 
 fn evaluate_with_spec(
@@ -966,6 +1180,7 @@ struct EvaluatedCondition {
     metrics: Option<EvaluationMetrics>,
     status: EvaluationStatus,
     evaluator: EvaluatorResult,
+    intervention: InterventionTelemetryResult,
     error_code: Option<EvaluationErrorCode>,
 }
 
@@ -975,6 +1190,7 @@ impl EvaluatedCondition {
         metrics: EvaluationMetrics,
         status: EvaluationStatus,
         evaluator: EvaluatorResult,
+        intervention: InterventionTelemetryResult,
         error_code: Option<EvaluationErrorCode>,
     ) -> Self {
         Self {
@@ -982,6 +1198,7 @@ impl EvaluatedCondition {
             metrics: Some(metrics),
             status,
             evaluator,
+            intervention,
             error_code,
         }
     }
@@ -1171,6 +1388,8 @@ pub struct EvaluationConditionResult {
     pub provenance: EvaluationConditionProvenance,
     #[serde(default)]
     pub retrieval: EvaluationRetrievalResult,
+    #[serde(default)]
+    pub intervention: InterventionTelemetryResult,
     pub trace_id: Option<String>,
     pub status: EvaluationStatus,
     pub error_code: Option<EvaluationErrorCode>,
@@ -1211,6 +1430,7 @@ impl EvaluationConditionResult {
                     )
                 }),
             },
+            intervention: evaluated.intervention,
             trace_id: evaluated.trace_id,
             status: evaluated.status,
             error_code: evaluated.error_code,
@@ -1442,6 +1662,10 @@ pub struct EvaluationAggregate {
     pub treatment_tokens: TokenUsageSummary,
     pub baseline_wall_time_ms: u64,
     pub treatment_wall_time_ms: u64,
+    #[serde(default)]
+    pub baseline_intervention: InterventionTelemetryAggregate,
+    #[serde(default)]
+    pub treatment_intervention: InterventionTelemetryAggregate,
 }
 
 impl EvaluationAggregate {
@@ -1466,6 +1690,10 @@ impl EvaluationAggregate {
             &mut self.treatment_wall_time_ms,
             &result.treatment,
         );
+        self.baseline_intervention
+            .add(&result.baseline.intervention);
+        self.treatment_intervention
+            .add(&result.treatment.intervention);
     }
 }
 

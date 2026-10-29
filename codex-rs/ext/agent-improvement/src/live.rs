@@ -21,6 +21,7 @@ use crate::EvaluatorSpec;
 use crate::EvolutionReport;
 use crate::ExperienceCard;
 use crate::ExperimentBrief;
+use crate::InterventionTelemetryEvidence;
 use crate::TaskFamily;
 
 /// Version of the private live-evaluation plan contract.
@@ -62,6 +63,10 @@ pub struct LiveEvaluationScenario {
     pub evaluator: EvaluatorSpec,
     #[serde(default)]
     pub budget: EvaluationBudget,
+    /// Private intervention context and optional event annotations for the
+    /// treatment condition. It is never copied into aggregate results.
+    #[serde(default)]
+    pub intervention_telemetry: Option<InterventionTelemetryEvidence>,
 }
 
 impl LiveEvaluationPlan {
@@ -104,6 +109,14 @@ impl LiveEvaluationPlan {
             );
             validate_live_task(&scenario.task)?;
             crate::eval::validate_evaluator(&scenario.evaluator)?;
+            if let Some(telemetry) = &scenario.intervention_telemetry {
+                telemetry.validate()?;
+                ensure!(
+                    telemetry.context.task_id == scenario.task.task_id,
+                    "live scenario {} telemetry task ID does not match task",
+                    scenario.scenario_id
+                );
+            }
             if scenario.evaluator.kind == crate::EvaluatorKind::PostRunVerification {
                 for check in &scenario.evaluator.checks {
                     ensure!(
@@ -294,6 +307,7 @@ mod tests {
                     require_all_checks: true,
                 },
                 budget: EvaluationBudget::default(),
+                intervention_telemetry: None,
             }],
         }
     }

@@ -30,6 +30,7 @@ use crate::ImprovementCandidateType;
 use crate::ImprovementContent;
 use crate::ImprovementEvidenceCatalog;
 use crate::ImprovementState;
+use crate::InterventionTelemetryResult;
 use crate::MetricDelta;
 use crate::PROMOTION_EVENT_STORE_FILE_NAME;
 use crate::PromotionPolicy;
@@ -101,6 +102,7 @@ fn condition(enabled: bool, task_success: bool, trace_id: &str) -> EvaluationCon
             },
         },
         retrieval: EvaluationRetrievalResult::default(),
+        intervention: InterventionTelemetryResult::default(),
         trace_id: Some(trace_id.to_string()),
         status: EvaluationStatus::Evaluated,
         error_code: None,

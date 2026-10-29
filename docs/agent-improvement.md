@@ -546,6 +546,24 @@ card text, prompts, paths, or card IDs. Do not proceed to a live intervention
 treatment if the report shows a nonzero
 `scoped_generic_fallback_irrelevant_count` or loss of relevant-card coverage.
 
+## Inspect intervention telemetry
+
+Milestone 8a.5 keeps causal attribution private and explicit. An intervention
+plan may carry an opaque experiment/task context with a card fingerprint,
+trigger ID, bounded action signatures, and independent-check IDs. The live
+runner writes the derived `selected`, `injected`, `action_attempted`,
+`agent_verification_attempted`, `independent_verification_passed`, and
+`outcome` events only to the private evaluation manifest. The public result
+contains counts and `yes`/`no`/`unknown` states, never card IDs, prompts,
+command tokens, paths, or raw event evidence.
+
+An action is `yes` only when a structured signature matches a recorded
+terminal/tool event or a private review annotation. Missing evidence is
+`unknown`, including interrupted or cost-limited runs. Agent verification is
+kept separate from evaluator-owned post-run checks. The default legacy lane
+does not require an intervention context, and this telemetry gate does not
+promote cards or claim a behavioral improvement.
+
 ## Review card adoption
 
 When a selected card is shown to the model, Codex records a bounded exposure

@@ -3780,6 +3780,19 @@ fn run_debug_agent_improvement_evaluate_command(
         )?;
         let treatment_retrieval =
             card_exposure_delta(&exposure_before, &card_exposure_snapshot(&treatment_store)?);
+        let treatment_intervention_telemetry =
+            scenario
+                .intervention_telemetry
+                .clone()
+                .map(|mut telemetry| {
+                    telemetry.context.selected_card_ids =
+                        treatment_retrieval.selected_card_ids.clone();
+                    telemetry.context.injection_count = treatment_retrieval
+                        .injection_count
+                        .try_into()
+                        .unwrap_or(u32::MAX);
+                    telemetry
+                });
 
         let attribution = AttributionEvidence {
             exposure: if treatment_retrieval.exposure_count > 0 {
@@ -3810,6 +3823,7 @@ fn run_debug_agent_improvement_evaluate_command(
                 &baseline_card_set_fingerprint,
                 None,
                 EvaluationRetrievalEvidence::default(),
+                None,
                 baseline_run.post_run,
             ),
             treatment: live_condition(
@@ -3823,6 +3837,7 @@ fn run_debug_agent_improvement_evaluate_command(
                 &treatment_card_set_fingerprint,
                 Some(treatment_store.clone()),
                 treatment_retrieval,
+                treatment_intervention_telemetry,
                 treatment_run.post_run,
             ),
             evaluator: scenario.evaluator.clone(),
@@ -3831,7 +3846,7 @@ fn run_debug_agent_improvement_evaluate_command(
         });
     }
 
-    let manifest = EvaluationManifest {
+    let mut manifest = EvaluationManifest {
         schema_version: EVALUATION_MANIFEST_SCHEMA_VERSION,
         manifest_id: format!(
             "live_{}",
@@ -3856,10 +3871,11 @@ fn run_debug_agent_improvement_evaluate_command(
         scenarios,
     };
     manifest.validate()?;
-    let manifest_path = run_dir.join("evaluation-manifest.json");
-    std::fs::write(&manifest_path, serde_json::to_vec_pretty(&manifest)?)?;
     let result =
         codex_agent_improvement_extension::evaluate_manifest_at(&manifest, current_unix_ms())?;
+    codex_agent_improvement_extension::materialize_intervention_telemetry(&mut manifest, &result)?;
+    let manifest_path = run_dir.join("evaluation-manifest.json");
+    std::fs::write(&manifest_path, serde_json::to_vec_pretty(&manifest)?)?;
     write_evaluation_result(&manifest, &result, &cmd.output)?;
 
     if cmd.record_outcome {
@@ -3896,6 +3912,9 @@ fn validate_live_evaluation_request(
 ) -> anyhow::Result<()> {
     validate_live_execution_options(&cmd.model, &cmd.reasoning_effort)?;
     validate_retrieval_options(&cmd.retrieval_mode, cmd.intervention_context_tokens)?;
+    if !cmd.dry_run && cmd.retrieval_mode == "intervention" {
+        validate_intervention_telemetry_contexts(plan, cmd.max_scenarios)?;
+    }
     anyhow::ensure!(
         plan.brief_id == brief.brief_id,
         "live plan targets {}, expected brief {}",
@@ -3925,6 +3944,20 @@ fn validate_live_evaluation_request(
             scenario.scenario_id
         );
     }
+    Ok(())
+}
+
+fn validate_intervention_telemetry_contexts(
+    plan: &LiveEvaluationPlan,
+    max_scenarios: usize,
+) -> anyhow::Result<()> {
+    anyhow::ensure!(
+        plan.scenarios
+            .iter()
+            .take(max_scenarios)
+            .all(|scenario| scenario.intervention_telemetry.is_some()),
+        "intervention live evaluation requires private telemetry context for every selected scenario"
+    );
     Ok(())
 }
 
@@ -4065,6 +4098,9 @@ fn live_condition(
     card_set_fingerprint: &str,
     card_store_path: Option<PathBuf>,
     retrieval: EvaluationRetrievalEvidence,
+    intervention_telemetry: Option<
+        codex_agent_improvement_extension::InterventionTelemetryEvidence,
+    >,
     post_run: Option<PostRunEvidence>,
 ) -> EvaluationCondition {
     EvaluationCondition {
@@ -4081,6 +4117,7 @@ fn live_condition(
             card_store_path,
         },
         retrieval,
+        intervention_telemetry,
         judge: None,
         post_run,
     }
@@ -4439,6 +4476,7 @@ fn card_exposure_delta(
     EvaluationRetrievalEvidence {
         selected_card_ids,
         exposure_count,
+        injection_count: exposure_count,
     }
 }
 
@@ -8320,6 +8358,7 @@ enabled = true
                     require_all_checks: true,
                 },
                 budget: codex_agent_improvement_extension::EvaluationBudget::default(),
+                intervention_telemetry: None,
             }
         }
 
@@ -8332,6 +8371,59 @@ enabled = true
         let failing = scenario("false");
         let failing_scenarios = vec![&failing];
         assert!(run_preflight_checks(&failing_scenarios, worktree.path(), 1_000).is_err());
+    }
+
+    #[test]
+    fn intervention_live_run_requires_private_telemetry_context() {
+        let scenario = LiveEvaluationScenario {
+            scenario_id: "telemetry-scenario".to_string(),
+            task_family: codex_agent_improvement_extension::TaskFamily::Coding,
+            split: codex_agent_improvement_extension::EvaluationSplit::HeldOut,
+            task: codex_agent_improvement_extension::EvaluationTask {
+                task_id: "telemetry-task".to_string(),
+                prompt: Some("run the fixture".to_string()),
+                reference: None,
+                fingerprint: "telemetry-task-fingerprint".to_string(),
+            },
+            evaluator: codex_agent_improvement_extension::EvaluatorSpec {
+                kind: EvaluatorKind::TraceOutcome,
+                checks: Vec::new(),
+                require_all_checks: true,
+            },
+            budget: codex_agent_improvement_extension::EvaluationBudget::default(),
+            intervention_telemetry: None,
+        };
+        let mut plan = LiveEvaluationPlan {
+            schema_version: codex_agent_improvement_extension::LIVE_EVALUATION_PLAN_SCHEMA_VERSION,
+            plan_id: "telemetry-plan".to_string(),
+            brief_id: "telemetry-brief".to_string(),
+            brief_fingerprint: "telemetry-brief-fingerprint".to_string(),
+            primary_checkout: PathBuf::from("/private/checkout"),
+            scenarios: vec![scenario],
+        };
+        assert!(validate_intervention_telemetry_contexts(&plan, 1).is_err());
+
+        plan.scenarios[0].intervention_telemetry = Some(
+            codex_agent_improvement_extension::InterventionTelemetryEvidence {
+                context: codex_agent_improvement_extension::InterventionTelemetryContext {
+                    schema_version:
+                        codex_agent_improvement_extension::INTERVENTION_TELEMETRY_SCHEMA_VERSION,
+                    experiment_id: "telemetry-experiment".to_string(),
+                    task_id: "telemetry-task".to_string(),
+                    card_fingerprint: format!("sha256:{}", "a".repeat(64)),
+                    trigger_id: "trigger-telemetry".to_string(),
+                    selected_card_ids: Vec::new(),
+                    injection_count: 0,
+                    action_signatures: Vec::new(),
+                    agent_verification_signatures: Vec::new(),
+                    independent_verification_check_ids: Vec::new(),
+                    reviewed_action_attempted: AttributionState::Unknown,
+                },
+                events: Vec::new(),
+            },
+        );
+        validate_intervention_telemetry_contexts(&plan, 1)
+            .expect("private telemetry context should satisfy the intervention gate");
     }
 
     #[test]
@@ -8444,6 +8536,7 @@ enabled = true
             EvaluationRetrievalEvidence {
                 selected_card_ids: vec!["card-kept".to_string(), "card-new".to_string()],
                 exposure_count: 3,
+                injection_count: 3,
             }
         );
     }

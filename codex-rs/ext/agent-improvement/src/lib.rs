@@ -19,6 +19,7 @@ mod retrieval_report;
 mod schema;
 mod store;
 mod summarize;
+mod telemetry;
 
 pub use benchmark::{
     BENCHMARK_BASELINE_INPUT_SCHEMA_VERSION, BENCHMARK_BASELINE_REPORT_SCHEMA_VERSION,
@@ -53,7 +54,7 @@ pub use eval::{
     EvaluationStatus, EvaluationTask, EvaluatorKind, EvaluatorResult, EvaluatorSpec,
     EvaluatorStatus, JudgeLabel, MetricDelta, PolicyStatus, PostRunEvidence, TraceStatus,
     VerificationCheck, evaluate_manifest, evaluate_manifest_at, load_evaluation_manifest,
-    write_evaluation_result,
+    materialize_intervention_telemetry, write_evaluation_result,
 };
 pub use evolve::{
     CardMaintenancePlan, EVOLUTION_HISTORY_FILE_NAME, EVOLUTION_HISTORY_SCHEMA_VERSION,
@@ -115,6 +116,12 @@ pub use store::{
     select_relevant, select_relevant_with_context, select_relevant_with_context_and_min_score,
 };
 pub use summarize::summarize_rollout;
+pub use telemetry::{
+    INTERVENTION_TELEMETRY_SCHEMA_VERSION, InterventionActionSignature, InterventionEventKind,
+    InterventionTelemetryAggregate, InterventionTelemetryContext, InterventionTelemetryEvent,
+    InterventionTelemetryEvidence, InterventionTelemetryResult, MAX_INTERVENTION_EVENTS,
+    MAX_INTERVENTION_SIGNATURES, derive_intervention_telemetry,
+};
 
 #[cfg(test)]
 mod candidate_tests;

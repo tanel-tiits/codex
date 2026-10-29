@@ -36,7 +36,17 @@ use super::PostRunEvidence;
 use super::TraceStatus;
 use super::VerificationCheck;
 use super::evaluate_manifest_at;
+use super::materialize_intervention_telemetry;
 use super::write_evaluation_result;
+use crate::AttributionState;
+use crate::InterventionActionSignature;
+use crate::InterventionEventKind;
+use crate::InterventionTelemetryContext;
+use crate::InterventionTelemetryEvent;
+use crate::InterventionTelemetryEvidence;
+use crate::OperationClass;
+use crate::ToolFamily;
+use crate::derive_intervention_telemetry;
 
 fn manifest_for(
     root: &Path,
@@ -88,6 +98,7 @@ fn manifest_for(
                     card_store_path: None,
                 },
                 retrieval: EvaluationRetrievalEvidence::default(),
+                intervention_telemetry: None,
                 judge: None,
                 post_run: None,
             },
@@ -105,6 +116,7 @@ fn manifest_for(
                     card_store_path: Some(card_store),
                 },
                 retrieval: EvaluationRetrievalEvidence::default(),
+                intervention_telemetry: None,
                 judge: None,
                 post_run: None,
             },
@@ -321,6 +333,33 @@ fn post_run_evaluator() -> EvaluatorSpec {
     }
 }
 
+fn telemetry_signature(command_tokens: &[&str]) -> InterventionActionSignature {
+    InterventionActionSignature {
+        operation_class: OperationClass::Command,
+        tool_family: ToolFamily::ExecCommand,
+        command_tokens: command_tokens
+            .iter()
+            .map(|token| (*token).to_string())
+            .collect(),
+    }
+}
+
+fn telemetry_context(task_id: &str) -> InterventionTelemetryContext {
+    InterventionTelemetryContext {
+        schema_version: crate::INTERVENTION_TELEMETRY_SCHEMA_VERSION,
+        experiment_id: "experiment-8a5".to_string(),
+        task_id: task_id.to_string(),
+        card_fingerprint: format!("sha256:{}", "a".repeat(64)),
+        trigger_id: "trigger-1".to_string(),
+        selected_card_ids: vec!["card-private-1".to_string()],
+        injection_count: 1,
+        action_signatures: vec![telemetry_signature(&["cargo", "test"])],
+        agent_verification_signatures: vec![telemetry_signature(&["cargo", "test"])],
+        independent_verification_check_ids: vec!["hidden-tests".to_string()],
+        reviewed_action_attempted: AttributionState::Unknown,
+    }
+}
+
 #[test]
 fn paired_eval_reports_held_out_outcomes_and_keeps_private_inputs_out() -> Result<()> {
     let temp = TempDir::new()?;
@@ -382,6 +421,295 @@ fn paired_eval_reports_held_out_outcomes_and_keeps_private_inputs_out() -> Resul
     assert!(!json.contains("baseline-worktree"));
     assert!(!json.contains("active-card-store"));
     assert!(!json.contains("command_tokens"));
+    Ok(())
+}
+
+#[test]
+fn telemetry_distinguishes_exposure_attempt_verification_and_failed_recovery() -> Result<()> {
+    let context = telemetry_context("parser-task");
+    let exposure_only = derive_intervention_telemetry(&context, 1, 1, None, None, None).to_result();
+    assert_eq!(exposure_only.selected, AttributionState::Yes);
+    assert_eq!(exposure_only.injected, AttributionState::Yes);
+    assert_eq!(exposure_only.action_attempted, AttributionState::Unknown);
+    assert_eq!(
+        exposure_only.agent_verification_attempted,
+        AttributionState::Unknown
+    );
+    assert_eq!(
+        exposure_only.independent_verification_passed,
+        AttributionState::Unknown
+    );
+    assert_eq!(exposure_only.outcome_observed, AttributionState::Unknown);
+    assert_eq!(exposure_only.outcome_count, 0);
+
+    let temp = TempDir::new()?;
+    let successful_path = trace_bundle(
+        temp.path(),
+        "successful",
+        RolloutStatus::Completed,
+        Some("cargo test"),
+    );
+    let successful_trace = super::replay_bundle(&successful_path)?;
+    let verified = derive_intervention_telemetry(
+        &context,
+        1,
+        1,
+        Some(&successful_trace),
+        Some(true),
+        Some(true),
+    )
+    .to_result();
+    assert_eq!(verified.action_attempt_count, 1);
+    assert_eq!(verified.action_attempted, AttributionState::Yes);
+    assert_eq!(verified.agent_verification_attempt_count, 1);
+    assert_eq!(verified.agent_verification_attempted, AttributionState::Yes);
+    assert_eq!(
+        verified.independent_verification_passed,
+        AttributionState::Yes
+    );
+    assert_eq!(verified.outcome_success, AttributionState::Yes);
+
+    let failed_path = trace_bundle(
+        temp.path(),
+        "failed",
+        RolloutStatus::Failed,
+        Some("cargo test"),
+    );
+    let failed_trace = super::replay_bundle(&failed_path)?;
+    let failed_recovery = derive_intervention_telemetry(
+        &context,
+        1,
+        1,
+        Some(&failed_trace),
+        Some(false),
+        Some(false),
+    )
+    .to_result();
+    assert_eq!(failed_recovery.action_attempted, AttributionState::Yes);
+    assert_eq!(
+        failed_recovery.independent_verification_passed,
+        AttributionState::No
+    );
+    assert_eq!(failed_recovery.outcome_success, AttributionState::No);
+    Ok(())
+}
+
+#[test]
+fn telemetry_action_signatures_reject_false_token_matches() -> Result<()> {
+    let temp = TempDir::new()?;
+    let path = trace_bundle(
+        temp.path(),
+        "false-match",
+        RolloutStatus::Completed,
+        Some("cargo contest"),
+    );
+    let trace = super::replay_bundle(&path)?;
+    let context = telemetry_context("parser-task");
+    let result =
+        derive_intervention_telemetry(&context, 1, 1, Some(&trace), None, None).to_result();
+    assert_eq!(result.action_attempt_count, 0);
+    assert_eq!(result.action_attempted, AttributionState::Unknown);
+    Ok(())
+}
+
+#[test]
+fn telemetry_event_validation_redacts_private_fields_and_rejects_duplicates() -> Result<()> {
+    let context = telemetry_context("parser-task");
+    let evidence = InterventionTelemetryEvidence {
+        context: context.clone(),
+        events: vec![
+            InterventionTelemetryEvent {
+                kind: InterventionEventKind::Selected,
+                state: AttributionState::Yes,
+                count: 1,
+                outcome_success: None,
+            },
+            InterventionTelemetryEvent {
+                kind: InterventionEventKind::Injected,
+                state: AttributionState::Yes,
+                count: 1,
+                outcome_success: None,
+            },
+            InterventionTelemetryEvent {
+                kind: InterventionEventKind::ActionAttempted,
+                state: AttributionState::Unknown,
+                count: 0,
+                outcome_success: None,
+            },
+            InterventionTelemetryEvent {
+                kind: InterventionEventKind::AgentVerificationAttempted,
+                state: AttributionState::Unknown,
+                count: 0,
+                outcome_success: None,
+            },
+            InterventionTelemetryEvent {
+                kind: InterventionEventKind::IndependentVerificationPassed,
+                state: AttributionState::No,
+                count: 0,
+                outcome_success: None,
+            },
+            InterventionTelemetryEvent {
+                kind: InterventionEventKind::Outcome,
+                state: AttributionState::Yes,
+                count: 1,
+                outcome_success: Some(true),
+            },
+        ],
+    };
+    evidence.validate()?;
+    let result = evidence.to_result();
+    let redacted = serde_json::to_string(&result)?;
+    assert!(!redacted.contains("card-private-1"));
+    assert!(!redacted.contains("command_tokens"));
+    assert!(!redacted.contains("cargo"));
+
+    let mut duplicate_injections = evidence.clone();
+    duplicate_injections
+        .events
+        .push(duplicate_injections.events[1].clone());
+    assert!(duplicate_injections.validate().is_err());
+
+    let mut duplicate_cards = evidence;
+    duplicate_cards
+        .context
+        .selected_card_ids
+        .push("card-private-1".to_string());
+    assert!(duplicate_cards.validate().is_err());
+    Ok(())
+}
+
+#[test]
+fn materialized_telemetry_stays_private_and_partial_runs_remain_unknown() -> Result<()> {
+    let temp = TempDir::new()?;
+    let traces = temp.path().join("traces");
+    fs::create_dir_all(&traces)?;
+    let baseline = trace_bundle(&traces, "baseline", RolloutStatus::Completed, None);
+    let treatment = trace_bundle(
+        &traces,
+        "treatment",
+        RolloutStatus::Completed,
+        Some("cargo test"),
+    );
+    let mut manifest = manifest_for(
+        &temp.path().join("scenario"),
+        baseline.clone(),
+        treatment,
+        trace_outcome_evaluator(),
+    );
+    manifest.scenarios[0].treatment.retrieval = EvaluationRetrievalEvidence {
+        selected_card_ids: vec!["card-private-1".to_string()],
+        exposure_count: 1,
+        injection_count: 1,
+    };
+    manifest.scenarios[0].treatment.intervention_telemetry = Some(InterventionTelemetryEvidence {
+        context: telemetry_context("parser-task"),
+        events: Vec::new(),
+    });
+    manifest.scenarios[0].treatment.post_run = Some(PostRunEvidence {
+        checks: vec![CheckResult {
+            check_id: "hidden-tests".to_string(),
+            success: true,
+        }],
+    });
+
+    let result = evaluate_manifest_at(&manifest, 123)?;
+    assert_eq!(
+        result.scenarios[0].baseline.intervention.selected,
+        AttributionState::No
+    );
+    assert_eq!(
+        result.scenarios[0].treatment.intervention.action_attempted,
+        AttributionState::Yes
+    );
+    assert_eq!(
+        result.scenarios[0]
+            .treatment
+            .intervention
+            .independent_verification_passed,
+        AttributionState::Yes
+    );
+    let public_result = serde_json::to_string(&result)?;
+    assert!(!public_result.contains("card-private-1"));
+    assert!(!public_result.contains("command_tokens"));
+
+    let mut missing_check_manifest = manifest.clone();
+    missing_check_manifest.scenarios[0]
+        .treatment
+        .intervention_telemetry
+        .as_mut()
+        .expect("treatment telemetry")
+        .context
+        .independent_verification_check_ids = vec!["missing-check".to_string()];
+    let missing_check_result = evaluate_manifest_at(&missing_check_manifest, 123)?;
+    assert_eq!(
+        missing_check_result.scenarios[0]
+            .treatment
+            .intervention
+            .independent_verification_passed,
+        AttributionState::Unknown
+    );
+
+    materialize_intervention_telemetry(&mut manifest, &result)?;
+    let private_manifest = serde_json::to_string(&manifest)?;
+    assert!(private_manifest.contains("card-private-1"));
+    assert_eq!(
+        manifest.scenarios[0]
+            .treatment
+            .intervention_telemetry
+            .as_ref()
+            .expect("treatment telemetry")
+            .events
+            .len(),
+        6
+    );
+
+    let interrupted = trace_bundle(
+        &traces,
+        "interrupted",
+        RolloutStatus::Aborted,
+        Some("cargo test"),
+    );
+    let mut interrupted_manifest = manifest_for(
+        &temp.path().join("interrupted-scenario"),
+        baseline,
+        interrupted,
+        trace_outcome_evaluator(),
+    );
+    interrupted_manifest.scenarios[0]
+        .treatment
+        .intervention_telemetry = Some(InterventionTelemetryEvidence {
+        context: telemetry_context("parser-task"),
+        events: Vec::new(),
+    });
+    let interrupted_result = evaluate_manifest_at(&interrupted_manifest, 123)?;
+    assert_eq!(
+        interrupted_result.scenarios[0]
+            .treatment
+            .intervention
+            .outcome_observed,
+        AttributionState::Unknown
+    );
+    assert_eq!(
+        interrupted_result.scenarios[0]
+            .treatment
+            .intervention
+            .outcome_count,
+        0
+    );
+
+    interrupted_manifest.scenarios[0].budget.max_trace_bytes = 1;
+    let limited_result = evaluate_manifest_at(&interrupted_manifest, 123)?;
+    assert_eq!(
+        limited_result.scenarios[0].treatment.status,
+        EvaluationStatus::CostLimited
+    );
+    assert_eq!(
+        limited_result.scenarios[0]
+            .treatment
+            .intervention
+            .outcome_observed,
+        AttributionState::Unknown
+    );
     Ok(())
 }
 
@@ -485,6 +813,7 @@ fn post_run_evaluator_uses_private_evidence_and_separates_trace_status() -> Resu
             "card-private-selection-a".to_string(),
         ],
         exposure_count: 3,
+        injection_count: 3,
     };
 
     let result = evaluate_manifest_at(&manifest, 123)?;
@@ -678,6 +1007,12 @@ fn validation_rejects_non_memory_pair_differences_and_overlap() -> Result<()> {
     assert!(manifest.validate().is_err());
 
     manifest.scenarios[0].treatment.policy_fingerprint = "policy-fingerprint".to_string();
+    manifest.scenarios[0].treatment.intervention_telemetry = Some(InterventionTelemetryEvidence {
+        context: telemetry_context("different-task"),
+        events: Vec::new(),
+    });
+    assert!(manifest.validate().is_err());
+    manifest.scenarios[0].treatment.intervention_telemetry = None;
     manifest.scenarios[0].treatment.worktree = manifest.scenarios[0].baseline.worktree.clone();
     assert!(manifest.validate().is_err());
     Ok(())

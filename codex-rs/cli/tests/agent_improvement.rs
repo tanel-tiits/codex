@@ -124,6 +124,7 @@ fn promotion_result(evaluated_at_unix_ms: i64) -> EvaluationResult {
             },
         },
         retrieval: EvaluationRetrievalResult::default(),
+        intervention: Default::default(),
         trace_id: Some(trace_id.to_string()),
         status: EvaluationStatus::Evaluated,
         error_code: None,
@@ -294,6 +295,7 @@ fn eval_command_writes_redacted_paired_results() -> Result<()> {
                 card_store_path,
             },
             retrieval: EvaluationRetrievalEvidence::default(),
+            intervention_telemetry: None,
             judge: None,
             post_run: None,
         }
@@ -1134,6 +1136,7 @@ fn evolve_evaluate_dry_run_validates_a_private_held_out_plan() -> Result<()> {
                     require_all_checks: true,
                 },
                 budget: EvaluationBudget::default(),
+                intervention_telemetry: None,
             })
             .collect(),
     };
