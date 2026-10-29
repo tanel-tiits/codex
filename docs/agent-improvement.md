@@ -401,8 +401,17 @@ codex debug agent-improvement evolve evaluate experiment_<ID> \
   --store "$CODEX_HOME/agent-improvement" \
   --run-root /private/tmp/codex-live-evaluations \
   --output /private/tmp/parser-evaluation-results.json \
+  --model gpt-5.6-luna \
+  --reasoning-effort high \
   --dry-run
 ```
+
+Embedded benchmark child runs default to the explicit `gpt-5.6-luna` model and
+`high` reasoning effort. Keep those settings visible in operator commands when
+reproducing a run.
+
+The live runner rejects Astra for this path and verifies the model and effort
+recorded in each private trace before accepting the run.
 
 After reviewing the printed execution contract, remove `--dry-run` to run
 baseline and treatment from the same commit in separate detached worktrees.

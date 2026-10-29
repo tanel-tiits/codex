@@ -835,9 +835,22 @@ struct DebugAgentImprovementEvolveEvaluateCommand {
     #[arg(long = "codex-bin", value_name = "FILE")]
     codex_bin: Option<PathBuf>,
 
-    /// Optional model override forwarded to both paired conditions.
-    #[arg(long = "model", short = 'm', value_name = "MODEL")]
-    model: Option<String>,
+    /// Model forwarded explicitly to both paired conditions.
+    #[arg(
+        long = "model",
+        short = 'm',
+        value_name = "MODEL",
+        default_value = "gpt-5.6-luna"
+    )]
+    model: String,
+
+    /// Reasoning effort forwarded explicitly to both paired conditions.
+    #[arg(
+        long = "reasoning-effort",
+        value_name = "EFFORT",
+        default_value = "high"
+    )]
+    reasoning_effort: String,
 
     /// Maximum held-out tasks to execute in this run.
     #[arg(long = "max-scenarios", default_value_t = 32)]
@@ -3576,6 +3589,8 @@ fn run_debug_agent_improvement_evaluate_command(
                 "scenario_count": plan.scenario_count().min(cmd.max_scenarios),
                 "codex_binary": codex_bin,
                 "dry_run": true,
+                "model": cmd.model.as_str(),
+                "reasoning_effort": cmd.reasoning_effort.as_str(),
                 "sandbox": "workspace-write",
                 "approval_policy": "never",
                 "automatic_promotion": false,
@@ -3635,8 +3650,8 @@ fn run_debug_agent_improvement_evaluate_command(
     let execution_fingerprint = fingerprint_descriptor(
         "execution-config-v1",
         &format!(
-            "model={};ephemeral=true;capture=off",
-            cmd.model.as_deref().unwrap_or("configured")
+            "model={};reasoning_effort={};ephemeral=true;capture=off",
+            cmd.model, cmd.reasoning_effort
         ),
     );
 
@@ -3664,7 +3679,8 @@ fn run_debug_agent_improvement_evaluate_command(
             &baseline_store,
             source_checkout_string,
             false,
-            cmd.model.as_deref(),
+            &cmd.model,
+            &cmd.reasoning_effort,
         )?;
         let exposure_before = card_exposure_snapshot(&treatment_store)?;
         let treatment_run = run_live_condition(
@@ -3675,7 +3691,8 @@ fn run_debug_agent_improvement_evaluate_command(
             &treatment_store,
             source_checkout_string,
             true,
-            cmd.model.as_deref(),
+            &cmd.model,
+            &cmd.reasoning_effort,
         )?;
         let treatment_retrieval =
             card_exposure_delta(&exposure_before, &card_exposure_snapshot(&treatment_store)?);
@@ -3793,6 +3810,7 @@ fn validate_live_evaluation_request(
     plan: &LiveEvaluationPlan,
     cmd: &DebugAgentImprovementEvolveEvaluateCommand,
 ) -> anyhow::Result<()> {
+    validate_live_execution_options(&cmd.model, &cmd.reasoning_effort)?;
     anyhow::ensure!(
         plan.brief_id == brief.brief_id,
         "live plan targets {}, expected brief {}",
@@ -3822,6 +3840,22 @@ fn validate_live_evaluation_request(
             scenario.scenario_id
         );
     }
+    Ok(())
+}
+
+fn validate_live_execution_options(model: &str, reasoning_effort: &str) -> anyhow::Result<()> {
+    anyhow::ensure!(!model.trim().is_empty(), "--model must not be empty");
+    anyhow::ensure!(
+        !model.to_ascii_lowercase().contains("astra"),
+        "Astra is disabled for embedded benchmark runs; select a non-Astra model"
+    );
+    anyhow::ensure!(
+        matches!(
+            reasoning_effort,
+            "low" | "medium" | "high" | "xhigh" | "max"
+        ),
+        "unsupported --reasoning-effort {reasoning_effort:?}; expected low, medium, high, xhigh, or max"
+    );
     Ok(())
 }
 
@@ -3987,7 +4021,8 @@ fn run_live_condition(
     store_root: &std::path::Path,
     source_workspace: &str,
     memory_enabled: bool,
-    model: Option<&str>,
+    model: &str,
+    reasoning_effort: &str,
 ) -> anyhow::Result<LiveConditionRun> {
     let prompt =
         scenario.task.prompt.as_deref().ok_or_else(|| {
@@ -3999,6 +4034,8 @@ fn run_live_condition(
         .arg("approval_policy=\"never\"")
         .arg("-c")
         .arg("sandbox_mode=\"workspace-write\"")
+        .arg("-c")
+        .arg(format!("model_reasoning_effort=\"{reasoning_effort}\""))
         .arg("-c")
         .arg(format!("agent_improvement.enabled={memory_enabled}"))
         .arg("-c")
@@ -4014,10 +4051,9 @@ fn run_live_condition(
         .arg("--ephemeral")
         .arg("--skip-git-repo-check")
         .arg("--sandbox")
-        .arg("workspace-write");
-    if let Some(model) = model {
-        command.arg("--model").arg(model);
-    }
+        .arg("workspace-write")
+        .arg("--model")
+        .arg(model);
     let status = command
         .arg("--")
         .arg(prompt)
@@ -4032,6 +4068,12 @@ fn run_live_condition(
         .with_context(|| format!("launch live evaluation for {}", scenario.scenario_id))?;
     let _ = wait_for_live_condition(status, scenario.budget.max_wall_time_ms)?;
     let trace_bundle = find_trace_bundle(trace_root, &scenario.scenario_id)?;
+    verify_live_trace_settings(
+        &trace_bundle,
+        &scenario.scenario_id,
+        model,
+        reasoning_effort,
+    )?;
     let post_run = (scenario.evaluator.kind == EvaluatorKind::PostRunVerification)
         .then(|| {
             run_post_run_checks(
@@ -4174,6 +4216,63 @@ fn find_trace_bundle(root: &std::path::Path, scenario_id: &str) -> anyhow::Resul
         bundles.len()
     );
     Ok(bundles.remove(0))
+}
+
+fn verify_live_trace_settings(
+    trace_bundle: &std::path::Path,
+    scenario_id: &str,
+    requested_model: &str,
+    requested_reasoning_effort: &str,
+) -> anyhow::Result<()> {
+    let trace_path = trace_bundle.join("trace.jsonl");
+    let trace = std::fs::read_to_string(&trace_path)
+        .with_context(|| format!("read live trace for {scenario_id}"))?;
+    let mut observed_models = BTreeSet::new();
+    let mut observed_efforts = BTreeSet::new();
+    for line in trace.lines() {
+        let Ok(event) = serde_json::from_str::<serde_json::Value>(line) else {
+            continue;
+        };
+        let Some(payload) = event.get("payload") else {
+            continue;
+        };
+        if payload.get("type").and_then(serde_json::Value::as_str) != Some("inference_started") {
+            continue;
+        }
+        if let Some(model) = payload.get("model").and_then(serde_json::Value::as_str) {
+            observed_models.insert(model.to_string());
+        }
+        let Some(relative_payload_path) = payload
+            .get("request_payload")
+            .and_then(|request| request.get("path"))
+            .and_then(serde_json::Value::as_str)
+        else {
+            continue;
+        };
+        let raw_payload_path = trace_bundle.join(relative_payload_path);
+        let Ok(raw_payload) = std::fs::read_to_string(raw_payload_path) else {
+            continue;
+        };
+        let Ok(raw_payload) = serde_json::from_str::<serde_json::Value>(&raw_payload) else {
+            continue;
+        };
+        if let Some(effort) = raw_payload
+            .get("reasoning")
+            .and_then(|reasoning| reasoning.get("effort"))
+            .and_then(serde_json::Value::as_str)
+        {
+            observed_efforts.insert(effort.to_string());
+        }
+    }
+    anyhow::ensure!(
+        observed_models.len() == 1 && observed_models.contains(requested_model),
+        "live scenario {scenario_id} reported model(s) {observed_models:?}; expected {requested_model}"
+    );
+    anyhow::ensure!(
+        observed_efforts.len() == 1 && observed_efforts.contains(requested_reasoning_effort),
+        "live scenario {scenario_id} reported reasoning effort(s) {observed_efforts:?}; expected {requested_reasoning_effort}"
+    );
+    Ok(())
 }
 
 fn copy_card_store(
@@ -6240,6 +6339,93 @@ enabled = true
             argv.extend(args);
             MultitoolCli::try_parse_from(argv).expect("evolve command parses");
         }
+    }
+
+    #[test]
+    fn debug_agent_improvement_evaluate_defaults_to_pinned_model_and_effort() {
+        let cli = MultitoolCli::try_parse_from([
+            "codex",
+            "debug",
+            "agent-improvement",
+            "evolve",
+            "evaluate",
+            "experiment_123",
+            "--briefs",
+            "/tmp/briefs.json",
+            "--plan",
+            "/tmp/live-plan.json",
+            "--store",
+            "/tmp/agent-improvement",
+            "--run-root",
+            "/tmp/live-runs",
+            "--output",
+            "/tmp/evaluation.json",
+            "--dry-run",
+        ])
+        .expect("parse evolve evaluate");
+        let Some(Subcommand::Debug(DebugCommand {
+            subcommand:
+                DebugSubcommand::AgentImprovement(DebugAgentImprovementCommand {
+                    subcommand: DebugAgentImprovementSubcommand::Evolve(command),
+                }),
+        })) = cli.subcommand
+        else {
+            panic!("expected evolve command");
+        };
+        let DebugAgentImprovementEvolveSubcommand::Evaluate(command) = command.subcommand else {
+            panic!("expected evolve evaluate command");
+        };
+
+        assert_eq!(command.model, "gpt-5.6-luna");
+        assert_eq!(command.reasoning_effort, "high");
+    }
+
+    #[test]
+    fn embedded_benchmark_execution_rejects_astra_and_unknown_effort() {
+        let astra_error = validate_live_execution_options("gpt-6-astra", "high")
+            .expect_err("Astra must be rejected");
+        assert!(astra_error.to_string().contains("Astra is disabled"));
+
+        let effort_error = validate_live_execution_options("gpt-5.6-luna", "ultra")
+            .expect_err("unknown effort must be rejected");
+        assert!(
+            effort_error
+                .to_string()
+                .contains("unsupported --reasoning-effort")
+        );
+    }
+
+    #[test]
+    fn embedded_benchmark_trace_settings_must_match_requested_values() {
+        let trace_bundle = tempfile::tempdir().expect("create trace bundle");
+        std::fs::create_dir(trace_bundle.path().join("payloads")).expect("create payloads");
+        std::fs::write(
+            trace_bundle.path().join("payloads/1.json"),
+            r#"{"reasoning":{"effort":"high"}}"#,
+        )
+        .expect("write raw payload");
+        let event = serde_json::json!({
+            "payload": {
+                "type": "inference_started",
+                "model": "gpt-5.6-luna",
+                "request_payload": {"path": "payloads/1.json"}
+            }
+        });
+        std::fs::write(
+            trace_bundle.path().join("trace.jsonl"),
+            format!(
+                "{}\n",
+                serde_json::to_string(&event).expect("serialize trace")
+            ),
+        )
+        .expect("write trace");
+
+        verify_live_trace_settings(trace_bundle.path(), "scenario-1", "gpt-5.6-luna", "high")
+            .expect("matching trace settings should pass");
+        let mismatch =
+            verify_live_trace_settings(trace_bundle.path(), "scenario-1", "gpt-5.6-luna", "medium")
+                .expect_err("mismatched effort should fail");
+        assert!(mismatch.to_string().contains("reasoning effort"));
     }
 
     #[test]
