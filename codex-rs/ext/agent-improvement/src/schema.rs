@@ -5,6 +5,8 @@ use serde::Serialize;
 use sha2::Digest;
 use sha2::Sha256;
 
+use crate::intervention::Intervention;
+
 /// Current on-disk experience-card schema.
 pub const EXPERIENCE_CARD_SCHEMA_VERSION: u32 = 2;
 pub(crate) const LEGACY_EXPERIENCE_CARD_SCHEMA_VERSION: u32 = 1;
@@ -920,6 +922,10 @@ pub struct ExperienceCard {
     pub recurrence: Recurrence,
     #[serde(default)]
     pub adoption: AdoptionEvidence,
+    /// Optional bounded intervention projection. Legacy cards without this
+    /// field remain readable and continue through the legacy retrieval lane.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub intervention: Option<Intervention>,
 }
 
 impl ExperienceCard {
@@ -1029,7 +1035,7 @@ impl ExperienceCard {
         let lesson_id = digest_id("lesson_", &content_identity);
         let card_id = digest_id("card_", &format!("{source_trace_id}\u{1f}{lesson_id}"));
 
-        Self {
+        let mut card = Self {
             schema_version: EXPERIENCE_CARD_SCHEMA_VERSION,
             card_id,
             lesson_id,
@@ -1055,25 +1061,32 @@ impl ExperienceCard {
                 last_seen_at_unix_ms: created_at_unix_ms,
             },
             adoption: AdoptionEvidence::default(),
-        }
+            intervention: None,
+        };
+        card.intervention = Intervention::from_card(&card);
+        card
     }
 
     /// Converts a version 1 card into the richer schema without inventing
     /// unsupported evidence.
     pub(crate) fn normalize_for_load(mut self) -> Option<Self> {
         match self.schema_version {
-            LEGACY_EXPERIENCE_CARD_SCHEMA_VERSION => Some(Self::new_with_details(
-                self.source_trace_id,
-                self.created_at_unix_ms,
-                self.task_family,
-                self.failure_class,
-                self.evidence,
-                self.topic_hashes,
-                self.activity_labels,
-                self.signals,
-                self.recommendation,
-                self.verification,
-            )),
+            LEGACY_EXPERIENCE_CARD_SCHEMA_VERSION => {
+                let mut migrated = Self::new_with_details(
+                    self.source_trace_id,
+                    self.created_at_unix_ms,
+                    self.task_family,
+                    self.failure_class,
+                    self.evidence,
+                    self.topic_hashes,
+                    self.activity_labels,
+                    self.signals,
+                    self.recommendation,
+                    self.verification,
+                );
+                migrated.intervention = None;
+                Some(migrated)
+            }
             EXPERIENCE_CARD_SCHEMA_VERSION => {
                 if self.source_trace_ids.is_empty() {
                     self.source_trace_ids.push(self.source_trace_id.clone());
@@ -1173,6 +1186,10 @@ impl ExperienceCard {
             && self.scope.is_bounded()
             && self.evidence_profile.is_bounded()
             && self.recurrence.count > 0
+            && self
+                .intervention
+                .as_ref()
+                .is_none_or(Intervention::is_bounded)
     }
 
     pub(crate) fn merge_with(&self, incoming: &Self) -> Self {
@@ -1212,6 +1229,9 @@ impl ExperienceCard {
                 .max(incoming.recurrence.last_seen_at_unix_ms),
         };
         merged.adoption = merge_adoption(&self.adoption, &incoming.adoption);
+        if self.intervention.is_some() || incoming.intervention.is_some() {
+            merged.intervention = Intervention::from_card(&merged);
+        }
         merged
     }
 

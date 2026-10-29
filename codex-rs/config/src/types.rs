@@ -62,6 +62,7 @@ pub const DEFAULT_AGENT_IMPROVEMENT_MAX_CARDS: usize = 8;
 pub const DEFAULT_AGENT_IMPROVEMENT_MAX_CONTEXT_TOKENS: usize = 1_200;
 pub const DEFAULT_AGENT_IMPROVEMENT_MIN_RELEVANCE_SCORE: usize = 0;
 pub const DEFAULT_AGENT_IMPROVEMENT_MAX_CANDIDATES: usize = 64;
+pub const DEFAULT_AGENT_IMPROVEMENT_INTERVENTION_CONTEXT_TOKENS: usize = 480;
 const MIN_MEMORIES_MAX_RAW_MEMORIES_FOR_CONSOLIDATION: usize = 1;
 const MAX_MEMORIES_MAX_RAW_MEMORIES_FOR_CONSOLIDATION: usize = 4096;
 const MIN_MEMORIES_MAX_ROLLOUTS_PER_STARTUP: usize = 1;
@@ -73,6 +74,8 @@ const MAX_AGENT_IMPROVEMENT_MAX_CONTEXT_TOKENS: usize = 8_000;
 const MAX_AGENT_IMPROVEMENT_MIN_RELEVANCE_SCORE: usize = 32;
 const MIN_AGENT_IMPROVEMENT_MAX_CANDIDATES: usize = 1;
 const MAX_AGENT_IMPROVEMENT_MAX_CANDIDATES: usize = 256;
+const MIN_AGENT_IMPROVEMENT_INTERVENTION_CONTEXT_TOKENS: usize = 300;
+const MAX_AGENT_IMPROVEMENT_INTERVENTION_CONTEXT_TOKENS: usize = 600;
 
 const fn default_enabled() -> bool {
     true
@@ -338,6 +341,17 @@ pub enum AgentImprovementCaptureMode {
     Candidate,
 }
 
+/// Selects the retrieval lane used by the opt-in agent-improvement extension.
+#[derive(Serialize, Deserialize, Debug, Copy, Clone, PartialEq, Eq, Default, JsonSchema)]
+#[serde(rename_all = "snake_case")]
+pub enum AgentImprovementRetrievalMode {
+    /// Existing broad historical-card retrieval.
+    #[default]
+    Legacy,
+    /// Bounded task-local intervention retrieval.
+    Intervention,
+}
+
 /// Opt-in local experience retrieval settings for agent improvement.
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq, Default, JsonSchema)]
 #[serde(deny_unknown_fields)]
@@ -359,6 +373,11 @@ pub struct AgentImprovementToml {
     /// Maximum number of pending candidates retained in the local review queue.
     #[schemars(range(min = 1, max = 256))]
     pub max_candidates: Option<usize>,
+    /// Retrieval lane. The intervention lane remains opt-in.
+    pub retrieval_mode: Option<AgentImprovementRetrievalMode>,
+    /// Context budget for one intervention, clamped to 300–600 tokens.
+    #[schemars(range(min = 300, max = 600))]
+    pub intervention_context_tokens: Option<usize>,
 }
 
 /// Effective agent improvement settings after defaults are applied.
@@ -370,6 +389,8 @@ pub struct AgentImprovementConfig {
     pub min_relevance_score: usize,
     pub capture: AgentImprovementCaptureMode,
     pub max_candidates: usize,
+    pub retrieval_mode: AgentImprovementRetrievalMode,
+    pub intervention_context_tokens: usize,
 }
 
 impl Default for AgentImprovementConfig {
@@ -381,6 +402,8 @@ impl Default for AgentImprovementConfig {
             min_relevance_score: DEFAULT_AGENT_IMPROVEMENT_MIN_RELEVANCE_SCORE,
             capture: AgentImprovementCaptureMode::Off,
             max_candidates: DEFAULT_AGENT_IMPROVEMENT_MAX_CANDIDATES,
+            retrieval_mode: AgentImprovementRetrievalMode::Legacy,
+            intervention_context_tokens: DEFAULT_AGENT_IMPROVEMENT_INTERVENTION_CONTEXT_TOKENS,
         }
     }
 }
@@ -412,6 +435,14 @@ impl From<AgentImprovementToml> for AgentImprovementConfig {
                 .clamp(
                     MIN_AGENT_IMPROVEMENT_MAX_CANDIDATES,
                     MAX_AGENT_IMPROVEMENT_MAX_CANDIDATES,
+                ),
+            retrieval_mode: toml.retrieval_mode.unwrap_or(defaults.retrieval_mode),
+            intervention_context_tokens: toml
+                .intervention_context_tokens
+                .unwrap_or(defaults.intervention_context_tokens)
+                .clamp(
+                    MIN_AGENT_IMPROVEMENT_INTERVENTION_CONTEXT_TOKENS,
+                    MAX_AGENT_IMPROVEMENT_INTERVENTION_CONTEXT_TOKENS,
                 ),
         }
     }

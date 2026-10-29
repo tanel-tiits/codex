@@ -124,7 +124,7 @@ satisfied.
 | 8a.1. Independent evaluation and observability hardening | Execute bounded evaluator-side checks before cleanup and separate coding outcome from trace and policy diagnostics | Essential before Milestone 8 | 8a | Complete; opt-in/manual; no automatic promotion |
 | 8a.2. Evaluator and retrieval hardening | Preflight evaluator contracts, bounded live retrieval, and separate selection/exposure evidence make the next pilot trustworthy | Essential before Milestone 8 | 8a.1 | Complete; opt-in/manual; no automatic promotion |
 | 8a.3. Benchmark and evaluator qualification | A realistic, non-ceiling task pack and adversarial evaluator fixtures make behavioral claims trustworthy | Essential | 8a.2 | In progress; contract and no-model qualification harness implemented, private pack/calibration/review pending |
-| 8a.4. Intervention cards and scoped retrieval | Cards contain a trigger, one bounded action, a verification target, and explicit scope; retrieval is task-local and low-noise | High value | 8a.3 | Planned |
+| 8a.4. Intervention cards and scoped retrieval | Cards contain a trigger, one bounded action, a verification target, and explicit scope; retrieval is task-local and low-noise | High value | 8a.3 | In progress; implementation and focused tests complete, offline exit gate pending |
 | 8a.5. Causal exposure and action telemetry | Private evidence distinguishes card selection, injection, attempted action, verification, and outcome without claiming causation from exposure | Essential | 8a.4 | Planned |
 | 8a.6. Repeated practical-value pilot | A preregistered 32–48-task study tests correctness, recovery, cost, and negative transfer across repeated trials | Essential decision gate | 8a.3–8a.5 | Planned |
 | 8a.7. Scoped canary and operating loop | A passing intervention can be manually activated for a narrow scope with TTL, monitoring, and rollback | Conditional high value | 8a.6 | Planned; only if 8a.6 passes |
@@ -817,8 +817,10 @@ evaluator are still required before this milestone can be marked complete.
 
 ### Milestone 8a.4 — Intervention cards and task-local retrieval
 
-**Implementation status: planned; the existing broad-card path remains
-opt-in and is not a proven treatment.**
+**Implementation status: in progress; the existing broad-card path remains
+opt-in and is not a proven treatment. The intervention lane and offline
+comparison report are implemented; the private retrieval case-set exit gate is
+still pending.**
 
 This milestone changes the unit of memory from a general historical paragraph
 to a bounded intervention that a model can recognize and verify. It should

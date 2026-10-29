@@ -1,4 +1,5 @@
 use codex_config::types::AgentImprovementCaptureMode;
+use codex_config::types::AgentImprovementRetrievalMode;
 use codex_context_fragments::ContextualUserFragment;
 use codex_extension_api::ExtensionData;
 use codex_extension_api::ExtensionRegistryBuilder;
@@ -31,6 +32,8 @@ fn config(root: &std::path::Path, enabled: bool) -> AgentImprovementExtensionCon
         min_relevance_score: 0,
         capture: AgentImprovementCaptureMode::Off,
         max_candidates: 8,
+        retrieval_mode: AgentImprovementRetrievalMode::Legacy,
+        intervention_context_tokens: 480,
     }
 }
 
@@ -43,6 +46,8 @@ fn capture_config(root: &std::path::Path) -> AgentImprovementExtensionConfig {
         min_relevance_score: 0,
         capture: AgentImprovementCaptureMode::Candidate,
         max_candidates: 8,
+        retrieval_mode: AgentImprovementRetrievalMode::Legacy,
+        intervention_context_tokens: 480,
     }
 }
 
@@ -50,14 +55,31 @@ async fn contribute(
     config: AgentImprovementExtensionConfig,
     query: &str,
 ) -> Vec<Box<dyn ContextualUserFragment + Send>> {
-    let extension = AgentImprovementExtension;
     let step_store = ExtensionData::new("step");
     let session_store = ExtensionData::new("session");
     let thread_store = ExtensionData::new("thread");
     let turn_store = ExtensionData::new("turn");
     thread_store.insert(config);
+    contribute_in_thread(
+        &thread_store,
+        query,
+        &step_store,
+        &session_store,
+        &turn_store,
+    )
+    .await
+}
+
+async fn contribute_in_thread(
+    thread_store: &ExtensionData,
+    query: &str,
+    step_store: &ExtensionData,
+    session_store: &ExtensionData,
+    turn_store: &ExtensionData,
+) -> Vec<Box<dyn ContextualUserFragment + Send>> {
+    let extension = AgentImprovementExtension;
     let input = TurnInputContext {
-        step_store: &step_store,
+        step_store,
         turn_id: "turn-1".to_string(),
         user_input: vec![UserInput::Text {
             text: query.to_string(),
@@ -66,7 +88,7 @@ async fn contribute(
         environments: Vec::new(),
     };
     extension
-        .contribute(input, None, &session_store, &thread_store, &turn_store)
+        .contribute(input, None, session_store, thread_store, turn_store)
         .await
 }
 
@@ -134,6 +156,73 @@ async fn relevant_cards_are_marked_advisory_and_untrusted() {
     assert!(text.contains(TEST_ADVISORY_CONTEXT_PREFIX));
     assert!(text.contains("task=coding"));
     assert!(!text.contains("task=review"));
+}
+
+#[tokio::test]
+async fn intervention_mode_injects_one_card_once_per_task_and_resets_for_new_task() {
+    let tempdir = tempfile::tempdir().expect("tempdir");
+    let intervention_card = card(
+        "trace-intervention",
+        TaskFamily::Coding,
+        "parser",
+        "Run the focused parser verification before editing more files.",
+    );
+    let card_id = intervention_card.card_id.clone();
+    append_card(tempdir.path(), &intervention_card).expect("append intervention card");
+
+    let mut intervention_config = config(tempdir.path(), true);
+    intervention_config.retrieval_mode = AgentImprovementRetrievalMode::Intervention;
+    intervention_config.intervention_context_tokens = 480;
+    let step_store = ExtensionData::new("step");
+    let session_store = ExtensionData::new("session");
+    let thread_store = ExtensionData::new("thread");
+    let turn_store = ExtensionData::new("turn");
+    thread_store.insert(intervention_config);
+
+    let first = contribute_in_thread(
+        &thread_store,
+        "fix the parser",
+        &step_store,
+        &session_store,
+        &turn_store,
+    )
+    .await;
+    assert_eq!(first.len(), 1);
+    let first_text = fragment_text(first[0].as_ref());
+    assert!(first_text.contains("Historical advisory intervention"));
+    assert!(first_text.contains("Action:"));
+    assert!(first_text.contains("Verification:"));
+    assert!(!first_text.contains(&card_id));
+
+    let repeated = contribute_in_thread(
+        &thread_store,
+        "fix the parser",
+        &step_store,
+        &session_store,
+        &turn_store,
+    )
+    .await;
+    assert!(repeated.is_empty());
+
+    let new_task = contribute_in_thread(
+        &thread_store,
+        "implement the database migration",
+        &step_store,
+        &session_store,
+        &turn_store,
+    )
+    .await;
+    assert_eq!(new_task.len(), 1);
+
+    let unrelated = contribute_in_thread(
+        &thread_store,
+        "review the documentation",
+        &step_store,
+        &session_store,
+        &turn_store,
+    )
+    .await;
+    assert!(unrelated.is_empty());
 }
 
 #[tokio::test]

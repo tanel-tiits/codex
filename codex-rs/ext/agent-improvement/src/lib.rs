@@ -12,8 +12,10 @@ mod eval;
 mod evolve;
 mod extension;
 mod improvement;
+mod intervention;
 mod live;
 mod promotion;
+mod retrieval_report;
 mod schema;
 mod store;
 mod summarize;
@@ -71,6 +73,12 @@ pub use improvement::{
     ImprovementTarget, ImprovementValidationKind, ImprovementValidationRequirement,
     load_improvement_candidate, write_improvement_candidate,
 };
+pub use intervention::{
+    DEFAULT_INTERVENTION_CONTEXT_TOKENS, INTERVENTION_SCHEMA_VERSION, Intervention,
+    InterventionEvidence, InterventionRetrievalContext, InterventionScope,
+    MAX_INTERVENTION_CONTEXT_TOKENS, MIN_INTERVENTION_CONTEXT_TOKENS, render_intervention,
+    select_intervention,
+};
 pub use live::{
     AGENT_IMPROVEMENT_ROOT_ENV, AGENT_IMPROVEMENT_WORKSPACE_PATH_ENV,
     LIVE_EVALUATION_PLAN_SCHEMA_VERSION, LiveEvaluationPlan, LiveEvaluationScenario,
@@ -86,6 +94,11 @@ pub use promotion::{
     load_promotion_state, load_runtime_cards, promote_proposal, promote_proposal_with_policy,
     promotion_events_path, promotion_policy_path, promotion_status, reject_proposal,
     retire_proposal, rollback_proposal, validate_proposal, write_promotion_policy,
+};
+pub use retrieval_report::{
+    INTERVENTION_RETRIEVAL_CASES_SCHEMA_VERSION, INTERVENTION_RETRIEVAL_REPORT_SCHEMA_VERSION,
+    InterventionRetrievalCase, InterventionRetrievalCaseSet, InterventionRetrievalReport,
+    MAX_INTERVENTION_RETRIEVAL_CASES, compare_retrieval_policies,
 };
 pub use schema::{
     AdoptionEvidence, AgentImprovementEvidence, AttributionState, CardStatus, ConfidenceLevel,
@@ -120,6 +133,12 @@ mod summarize_tests;
 
 #[cfg(test)]
 mod extension_tests;
+
+#[cfg(test)]
+mod intervention_tests;
+
+#[cfg(test)]
+mod retrieval_report_tests;
 
 #[cfg(test)]
 mod evolve_tests;

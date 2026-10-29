@@ -152,6 +152,8 @@ fn agent_improvement_is_opt_in_and_clamps_context_limits() {
             min_relevance_score: 0,
             capture: AgentImprovementCaptureMode::Off,
             max_candidates: 64,
+            retrieval_mode: AgentImprovementRetrievalMode::Legacy,
+            intervention_context_tokens: 480,
         }
     );
 
@@ -162,6 +164,8 @@ fn agent_improvement_is_opt_in_and_clamps_context_limits() {
         min_relevance_score: Some(999),
         capture: Some(AgentImprovementCaptureMode::Candidate),
         max_candidates: Some(999),
+        retrieval_mode: Some(AgentImprovementRetrievalMode::Intervention),
+        intervention_context_tokens: Some(999),
     });
     assert_eq!(config.enabled, true);
     assert_eq!(config.max_cards, 1);
@@ -169,6 +173,11 @@ fn agent_improvement_is_opt_in_and_clamps_context_limits() {
     assert_eq!(config.min_relevance_score, 32);
     assert_eq!(config.capture, AgentImprovementCaptureMode::Candidate);
     assert_eq!(config.max_candidates, 256);
+    assert_eq!(
+        config.retrieval_mode,
+        AgentImprovementRetrievalMode::Intervention
+    );
+    assert_eq!(config.intervention_context_tokens, 600);
 }
 
 #[test]

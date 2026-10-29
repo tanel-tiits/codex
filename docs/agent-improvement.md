@@ -23,6 +23,9 @@ max_context_tokens = 1200
 min_relevance_score = 0
 capture = "off"
 max_candidates = 64
+# Optional scoped-intervention lane; legacy remains the default.
+retrieval_mode = "legacy"
+intervention_context_tokens = 480
 ```
 
 The card store is:
@@ -39,6 +42,14 @@ relevance floor after those matches; zero preserves the normal broad retrieval
 behavior. A mismatched opaque workspace is filtered; unknown scope remains a
 fallback. Missing stores, malformed lines, oversized cards, and read failures
 are ignored with a bounded warning.
+
+Set `retrieval_mode = "intervention"` only for an explicitly reviewed,
+offline-qualified comparison. This lane reads versioned intervention
+projections from reviewed cards, injects at most one historical/advisory card
+per task trigger, and bounds its context to 300–600 tokens. It cannot invoke a
+tool, grant permission, or override any instruction or sandbox boundary. Cards
+without a useful trigger or verification target, and legacy cards without an
+intervention projection, remain available only to the legacy lane.
 
 Cards use schema version 2. Each card contains a bounded observed sequence
 (`turn`, `inference`, `tool`, `terminal_operation`, verification, policy, or
@@ -410,6 +421,11 @@ Embedded benchmark child runs default to the explicit `gpt-5.6-luna` model and
 `high` reasoning effort. Keep those settings visible in operator commands when
 reproducing a run.
 
+The live evaluator defaults to `--retrieval-mode legacy`; an intervention
+comparison must opt in explicitly with `--retrieval-mode intervention` and
+`--intervention-context-tokens 480`. That option is for a later gated pilot,
+not a replacement for the offline retrieval report or the 8a.5 telemetry gate.
+
 The live runner rejects Astra for this path and verifies the model and effort
 recorded in each private trace before accepting the run.
 
@@ -512,6 +528,23 @@ codex debug agent-improvement benchmark calibrate \\
 The qualified difficulty range is 40–75% baseline success. Above 85% is a
 ceiling test; below 25% is too difficult. This report calibrates benchmark
 difficulty only and does not promote cards or establish a treatment effect.
+
+Before any treatment run, compare broad and scoped retrieval with a private
+case set. The case set contains the private query, reduced retrieval context,
+and expected relevant card IDs; the aggregate report contains counts and
+precision/coverage only:
+
+```bash
+codex debug agent-improvement benchmark retrieval-report \
+  /private/path/to/retrieval-cases.json \
+  --cards "$CODEX_HOME/agent-improvement" \
+  --output /private/tmp/retrieval-report.json
+```
+
+This command makes no model call and does not print the private case set,
+card text, prompts, paths, or card IDs. Do not proceed to a live intervention
+treatment if the report shows a nonzero
+`scoped_generic_fallback_irrelevant_count` or loss of relevant-card coverage.
 
 ## Review card adoption
 

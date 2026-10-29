@@ -30,6 +30,7 @@ use codex_agent_improvement_extension::FixtureExecutionStatus;
 use codex_agent_improvement_extension::ImprovementCandidate;
 use codex_agent_improvement_extension::ImprovementCandidateStatus;
 use codex_agent_improvement_extension::ImprovementEvidenceCatalog;
+use codex_agent_improvement_extension::InterventionRetrievalCaseSet;
 use codex_agent_improvement_extension::LiveEvaluationPlan;
 use codex_agent_improvement_extension::LiveEvaluationScenario;
 use codex_agent_improvement_extension::PostRunEvidence;
@@ -43,6 +44,7 @@ use codex_agent_improvement_extension::calibrate_baseline;
 use codex_agent_improvement_extension::candidates_path;
 use codex_agent_improvement_extension::cards_path;
 use codex_agent_improvement_extension::compact_card_store;
+use codex_agent_improvement_extension::compare_retrieval_policies;
 use codex_agent_improvement_extension::current_unix_ms;
 use codex_agent_improvement_extension::evaluate_manifest;
 use codex_agent_improvement_extension::evaluate_proposal;
@@ -469,6 +471,9 @@ enum DebugAgentImprovementBenchmarkSubcommand {
 
     /// Classify a retrieval-disabled baseline as qualified, ceiling, or too hard.
     Calibrate(DebugAgentImprovementBenchmarkCalibrateCommand),
+
+    /// Compare broad and scoped retrieval using private cases without model execution.
+    RetrievalReport(DebugAgentImprovementBenchmarkRetrievalReportCommand),
 }
 
 #[derive(Debug, Parser)]
@@ -508,6 +513,37 @@ struct DebugAgentImprovementBenchmarkCalibrateCommand {
     baseline: PathBuf,
 
     /// Optional private calibration report destination.
+    #[arg(long = "output", short = 'o', value_name = "REPORT")]
+    output: Option<PathBuf>,
+}
+
+#[derive(Debug, Parser)]
+struct DebugAgentImprovementBenchmarkRetrievalReportCommand {
+    /// Private retrieval cases containing queries and expected relevant card IDs.
+    #[arg(value_name = "CASES")]
+    cases: PathBuf,
+
+    /// Agent-improvement store containing the cards to compare.
+    #[arg(long = "cards", value_name = "DIR", required = true)]
+    cards: PathBuf,
+
+    /// Maximum legacy cards selected for each case.
+    #[arg(long = "max-cards", default_value_t = 2)]
+    max_cards: usize,
+
+    /// Maximum legacy context budget per case.
+    #[arg(long = "max-context-tokens", default_value_t = 1_200)]
+    max_context_tokens: usize,
+
+    /// Scoped intervention context budget per case.
+    #[arg(long = "intervention-context-tokens", default_value_t = 480)]
+    intervention_context_tokens: usize,
+
+    /// Legacy relevance floor used for the comparison lane.
+    #[arg(long = "min-relevance-score", default_value_t = 6)]
+    min_relevance_score: usize,
+
+    /// Optional redacted aggregate report destination.
     #[arg(long = "output", short = 'o', value_name = "REPORT")]
     output: Option<PathBuf>,
 }
@@ -851,6 +887,15 @@ struct DebugAgentImprovementEvolveEvaluateCommand {
         default_value = "high"
     )]
     reasoning_effort: String,
+
+    /// Retrieval policy forwarded to both paired conditions. The default
+    /// preserves the legacy comparison lane; scoped interventions are opt-in.
+    #[arg(long = "retrieval-mode", value_name = "MODE", default_value = "legacy")]
+    retrieval_mode: String,
+
+    /// Scoped intervention context budget when --retrieval-mode=intervention.
+    #[arg(long = "intervention-context-tokens", default_value_t = 480)]
+    intervention_context_tokens: usize,
 
     /// Maximum held-out tasks to execute in this run.
     #[arg(long = "max-scenarios", default_value_t = 32)]
@@ -2907,7 +2952,37 @@ fn run_debug_agent_improvement_benchmark_command(
             protected.push(path_identity_for_cli(&cmd.baseline));
             emit_benchmark_json(&report, cmd.output.as_deref(), &protected)?;
         }
+        DebugAgentImprovementBenchmarkSubcommand::RetrievalReport(cmd) => {
+            run_debug_agent_improvement_benchmark_retrieval_report_command(cmd)?;
+        }
     }
+    Ok(())
+}
+
+fn run_debug_agent_improvement_benchmark_retrieval_report_command(
+    cmd: DebugAgentImprovementBenchmarkRetrievalReportCommand,
+) -> anyhow::Result<()> {
+    let cases: InterventionRetrievalCaseSet = serde_json::from_reader(
+        std::fs::File::open(&cmd.cases)
+            .with_context(|| format!("open retrieval case set {}", cmd.cases.display()))?,
+    )
+    .with_context(|| format!("parse retrieval case set {}", cmd.cases.display()))?;
+    cases.validate()?;
+    let cards = load_cards(&cmd.cards)?;
+    let report = compare_retrieval_policies(
+        &cards,
+        &cases,
+        cmd.max_cards,
+        cmd.max_context_tokens,
+        cmd.intervention_context_tokens,
+        cmd.min_relevance_score,
+    )?;
+    let protected = vec![
+        path_identity_for_cli(&cmd.cases),
+        path_identity_for_cli(&cmd.cards),
+        path_identity_for_cli(&cards_path(&cmd.cards)),
+    ];
+    emit_benchmark_json(&report, cmd.output.as_deref(), &protected)?;
     Ok(())
 }
 
@@ -3591,6 +3666,8 @@ fn run_debug_agent_improvement_evaluate_command(
                 "dry_run": true,
                 "model": cmd.model.as_str(),
                 "reasoning_effort": cmd.reasoning_effort.as_str(),
+                "retrieval_mode": cmd.retrieval_mode.as_str(),
+                "intervention_context_tokens": cmd.intervention_context_tokens,
                 "sandbox": "workspace-write",
                 "approval_policy": "never",
                 "automatic_promotion": false,
@@ -3639,9 +3716,12 @@ fn run_debug_agent_improvement_evaluate_command(
     let initial_cards = load_cards(&cmd.store)?;
     let treatment_card_set_fingerprint = fingerprint_card_set(&initial_cards);
     let baseline_card_set_fingerprint = fingerprint_card_set(&[]);
-    let retrieval_policy_fingerprint = fingerprint_descriptor(
-        "retrieval-policy-v1",
-        "max_cards=2;max_context_tokens=1200;min_relevance_score=6;workspace_override=source",
+    let retrieval_policy_fingerprint = retrieval_policy_fingerprint(
+        &cmd.retrieval_mode,
+        2,
+        1_200,
+        6,
+        cmd.intervention_context_tokens,
     );
     let policy_fingerprint = fingerprint_descriptor(
         "execution-policy-v1",
@@ -3681,6 +3761,8 @@ fn run_debug_agent_improvement_evaluate_command(
             false,
             &cmd.model,
             &cmd.reasoning_effort,
+            &cmd.retrieval_mode,
+            cmd.intervention_context_tokens,
         )?;
         let exposure_before = card_exposure_snapshot(&treatment_store)?;
         let treatment_run = run_live_condition(
@@ -3693,6 +3775,8 @@ fn run_debug_agent_improvement_evaluate_command(
             true,
             &cmd.model,
             &cmd.reasoning_effort,
+            &cmd.retrieval_mode,
+            cmd.intervention_context_tokens,
         )?;
         let treatment_retrieval =
             card_exposure_delta(&exposure_before, &card_exposure_snapshot(&treatment_store)?);
@@ -3811,6 +3895,7 @@ fn validate_live_evaluation_request(
     cmd: &DebugAgentImprovementEvolveEvaluateCommand,
 ) -> anyhow::Result<()> {
     validate_live_execution_options(&cmd.model, &cmd.reasoning_effort)?;
+    validate_retrieval_options(&cmd.retrieval_mode, cmd.intervention_context_tokens)?;
     anyhow::ensure!(
         plan.brief_id == brief.brief_id,
         "live plan targets {}, expected brief {}",
@@ -3857,6 +3942,40 @@ fn validate_live_execution_options(model: &str, reasoning_effort: &str) -> anyho
         "unsupported --reasoning-effort {reasoning_effort:?}; expected low, medium, high, xhigh, or max"
     );
     Ok(())
+}
+
+fn validate_retrieval_options(
+    mode: &str,
+    intervention_context_tokens: usize,
+) -> anyhow::Result<()> {
+    anyhow::ensure!(
+        matches!(mode, "legacy" | "intervention"),
+        "unsupported --retrieval-mode {mode:?}; expected legacy or intervention"
+    );
+    anyhow::ensure!(
+        (codex_agent_improvement_extension::MIN_INTERVENTION_CONTEXT_TOKENS
+            ..=codex_agent_improvement_extension::MAX_INTERVENTION_CONTEXT_TOKENS)
+            .contains(&intervention_context_tokens),
+        "--intervention-context-tokens must be between {} and {}",
+        codex_agent_improvement_extension::MIN_INTERVENTION_CONTEXT_TOKENS,
+        codex_agent_improvement_extension::MAX_INTERVENTION_CONTEXT_TOKENS
+    );
+    Ok(())
+}
+
+fn retrieval_policy_fingerprint(
+    mode: &str,
+    max_cards: usize,
+    max_context_tokens: usize,
+    min_relevance_score: usize,
+    intervention_context_tokens: usize,
+) -> String {
+    fingerprint_descriptor(
+        "retrieval-policy-v1",
+        &format!(
+            "mode={mode};max_cards={max_cards};max_context_tokens={max_context_tokens};min_relevance_score={min_relevance_score};intervention_context_tokens={intervention_context_tokens};workspace_override=source"
+        ),
+    )
 }
 
 fn load_benchmark_qualification_report(
@@ -4023,6 +4142,8 @@ fn run_live_condition(
     memory_enabled: bool,
     model: &str,
     reasoning_effort: &str,
+    retrieval_mode: &str,
+    intervention_context_tokens: usize,
 ) -> anyhow::Result<LiveConditionRun> {
     let prompt =
         scenario.task.prompt.as_deref().ok_or_else(|| {
@@ -4046,6 +4167,14 @@ fn run_live_condition(
         .arg("agent_improvement.max_context_tokens=1200")
         .arg("-c")
         .arg("agent_improvement.min_relevance_score=6")
+        .arg("-c")
+        .arg(format!(
+            "agent_improvement.retrieval_mode=\"{retrieval_mode}\""
+        ))
+        .arg("-c")
+        .arg(format!(
+            "agent_improvement.intervention_context_tokens={intervention_context_tokens}"
+        ))
         .arg("exec")
         .arg("--json")
         .arg("--ephemeral")
@@ -6378,6 +6507,47 @@ enabled = true
 
         assert_eq!(command.model, "gpt-5.6-luna");
         assert_eq!(command.reasoning_effort, "high");
+        assert_eq!(command.retrieval_mode, "legacy");
+        assert_eq!(command.intervention_context_tokens, 480);
+    }
+
+    #[test]
+    fn debug_agent_improvement_benchmark_retrieval_report_parses_private_inputs() {
+        let cli = MultitoolCli::try_parse_from([
+            "codex",
+            "debug",
+            "agent-improvement",
+            "benchmark",
+            "retrieval-report",
+            "/tmp/retrieval-cases.json",
+            "--cards",
+            "/tmp/agent-improvement",
+            "--intervention-context-tokens",
+            "360",
+            "--output",
+            "/tmp/retrieval-report.json",
+        ])
+        .expect("parse retrieval report command");
+        let Some(Subcommand::Debug(DebugCommand {
+            subcommand:
+                DebugSubcommand::AgentImprovement(DebugAgentImprovementCommand {
+                    subcommand: DebugAgentImprovementSubcommand::Benchmark(command),
+                }),
+        })) = cli.subcommand
+        else {
+            panic!("expected benchmark command");
+        };
+        let DebugAgentImprovementBenchmarkSubcommand::RetrievalReport(command) = command.subcommand
+        else {
+            panic!("expected retrieval report command");
+        };
+        assert_eq!(command.cases, PathBuf::from("/tmp/retrieval-cases.json"));
+        assert_eq!(command.cards, PathBuf::from("/tmp/agent-improvement"));
+        assert_eq!(command.intervention_context_tokens, 360);
+        assert_eq!(
+            command.output,
+            Some(PathBuf::from("/tmp/retrieval-report.json"))
+        );
     }
 
     #[test]
@@ -6392,6 +6562,32 @@ enabled = true
             effort_error
                 .to_string()
                 .contains("unsupported --reasoning-effort")
+        );
+    }
+
+    #[test]
+    fn embedded_benchmark_retrieval_policy_is_bounded_and_explicit() {
+        validate_retrieval_options("legacy", 300).expect("legacy mode should validate");
+        validate_retrieval_options("intervention", 600).expect("intervention mode should validate");
+        assert!(validate_retrieval_options("unknown", 480).is_err());
+        assert!(validate_retrieval_options("intervention", 299).is_err());
+
+        let baseline = retrieval_policy_fingerprint("legacy", 2, 1_200, 6, 480);
+        assert_ne!(
+            baseline,
+            retrieval_policy_fingerprint("intervention", 2, 1_200, 6, 480)
+        );
+        assert_ne!(
+            baseline,
+            retrieval_policy_fingerprint("legacy", 1, 1_200, 6, 480)
+        );
+        assert_ne!(
+            baseline,
+            retrieval_policy_fingerprint("legacy", 2, 600, 6, 480)
+        );
+        assert_ne!(
+            baseline,
+            retrieval_policy_fingerprint("legacy", 2, 1_200, 7, 480)
         );
     }
 

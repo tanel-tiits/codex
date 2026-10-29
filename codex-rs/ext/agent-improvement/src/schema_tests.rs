@@ -138,7 +138,21 @@ fn legacy_and_unknown_schema_versions_are_handled_explicitly() {
     let migrated = migrated.normalize_for_load().expect("migrate legacy card");
     assert_eq!(migrated.schema_version, 2);
     assert_eq!(migrated.source_trace_id, "trace-legacy");
+    assert!(migrated.intervention.is_none());
     assert!(migrated.is_bounded());
+
+    let mut legacy_v2 = serde_json::to_value(&card).expect("serialize v2 card");
+    legacy_v2
+        .as_object_mut()
+        .expect("card object")
+        .remove("intervention");
+    let legacy_v2: ExperienceCard =
+        serde_json::from_value(legacy_v2).expect("deserialize v2 card without intervention");
+    let legacy_v2 = legacy_v2
+        .normalize_for_load()
+        .expect("load v2 card without intervention");
+    assert!(legacy_v2.intervention.is_none());
+    assert!(legacy_v2.is_bounded());
 
     let mut unknown = serde_json::to_value(&card).expect("serialize card");
     unknown["schema_version"] = serde_json::json!(42);

@@ -43,6 +43,7 @@ use codex_config::permissions_toml::PermissionsToml;
 use codex_config::permissions_toml::WorkspaceRootsToml;
 use codex_config::types::AgentImprovementCaptureMode;
 use codex_config::types::AgentImprovementConfig;
+use codex_config::types::AgentImprovementRetrievalMode;
 use codex_config::types::AgentImprovementToml;
 use codex_config::types::AppToolApproval;
 use codex_config::types::ApprovalsReviewer;
@@ -276,6 +277,8 @@ max_context_tokens = 9000
             min_relevance_score: None,
             capture: None,
             max_candidates: None,
+            retrieval_mode: None,
+            intervention_context_tokens: None,
         })
     );
 
@@ -295,6 +298,8 @@ max_context_tokens = 9000
             min_relevance_score: 0,
             capture: AgentImprovementCaptureMode::Off,
             max_candidates: 64,
+            retrieval_mode: AgentImprovementRetrievalMode::Legacy,
+            intervention_context_tokens: 480,
         }
     );
     Ok(())
